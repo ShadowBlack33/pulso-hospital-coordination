@@ -19,6 +19,11 @@ from fastapi.responses import JSONResponse
 from app.api import admin, asignacion, auth, cirugias, clinico, clusters, contabilidad, eventos, fhir_hook, imaging, pacientes, perfiles, puerta_fhir, recursos, remisiones, usuarios
 from app.api import alertas, historia, ia
 from app.api import rag
+from app.api import agente
+from app.api import interop
+from app.api import remisiones_externas
+from app.api import consentimientos
+from app.api import seguridad
 from app.core.config import get_settings
 from app.services import bandeja, fhir_reactivo, metricas  # noqa: F401 -- bandeja registra los hooks de commit
 from app.services import eventos as eventos_vivo
@@ -84,7 +89,18 @@ async def ciclo_de_vida(app: FastAPI):
             # R20: escala las alertas críticas sin reconocer (app/api/alertas.py).
             asyncio.create_task(alertas.bucle_escalamiento(), name="escalamiento_alertas"),
         ]
-    yield
+    # Agente (Semana 13): un solo harness para todo el proceso, con su memoria en PostgreSQL
+    # (o en memoria del proceso si la base no responde). Ver app/agente/ y docs/AGENTE.md.
+    from app.agente.harness import Harness, construir_agente   # noqa: PLC0415
+    from app.agente.memoria import abrir_memoria               # noqa: PLC0415
+    async with abrir_memoria() as (checkpointer, store, tipo):
+        try:
+            app.state.harness = Harness(construir_agente(checkpointer, store), store, tipo) \
+                if settings.agente_activo else None
+        except Exception:  # noqa: BLE001 -- sin agente, Lati sigue funcionando con el RAG
+            logging.getLogger("hsr.agente").exception("No se pudo construir el agente")
+            app.state.harness = None
+        yield
     for t in tareas:
         t.cancel()
     await asyncio.gather(*tareas, return_exceptions=True)
@@ -164,6 +180,11 @@ app.include_router(alertas.router)
 app.include_router(historia.router)
 # Semana 12 · RAG con citas (docs/RAG.md)
 app.include_router(rag.router)
+app.include_router(agente.router)
+app.include_router(interop.router)
+app.include_router(remisiones_externas.router)
+app.include_router(consentimientos.router)
+app.include_router(seguridad.router)
 
 
 @app.get("/", tags=["Sistema"], summary="Información de la API")
