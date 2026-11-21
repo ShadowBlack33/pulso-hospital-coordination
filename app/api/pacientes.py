@@ -9,18 +9,22 @@ Este módulo es la referencia del patrón que siguen las demás entidades:
 """
 from __future__ import annotations
 
+import logging
+import re
 from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.core.crypto import blind_index, cifrar, descifrar, enmascarar
+from app.core.crypto import blind_index, blind_index_contacto, cifrar, descifrar, enmascarar
 from app.core.deps import ContextoAcceso, RequierePermiso, get_db
 from app.models import Paciente
 from app.services import fhir as fhir_svc
+from app.services import interop
 from app.services.auditoria import registrar, restaurar, snapshot, soft_delete, soft_edit
 
+log = logging.getLogger("pulso.pacientes")
 router = APIRouter(prefix="/pacientes", tags=["Pacientes"])
 
 
@@ -124,6 +128,8 @@ def crear(datos: PacienteCrear, request: Request,
         apellido_cifrado=cifrar(datos.apellido, "pacientes.apellido"),
         telefono_cifrado=cifrar(datos.telefono, "pacientes.telefono"),
         email_cifrado=cifrar(datos.email, "pacientes.email"),
+        telefono_bidx=blind_index_contacto(datos.telefono, "pacientes.telefono"),
+        email_bidx=blind_index_contacto(datos.email, "pacientes.email"),
         direccion_cifrada=cifrar(datos.direccion, "pacientes.direccion"),
         fecha_nacimiento=datos.fecha_nacimiento,
         sexo=datos.sexo,
@@ -136,12 +142,27 @@ def crear(datos: PacienteCrear, request: Request,
     )
     db.add(p)
     db.flush()
+    _federar(db, bidx, datos.tipo_documento, datos.documento)
     registrar(db, ctx.usuario, "paciente", p.id, "create",
               valor_nuevo=snapshot(p), request=request)
     db.commit()
     db.refresh(p)
     _publicar_en_fhir(db, p)
     return _a_respuesta(p)
+
+
+def _federar(db: Session, paciente_id: str, tipo_documento: str, documento: str) -> None:
+    """
+    Le da al paciente su identificador federado (para recibir resultados de otros sistemas) y asocia lo que
+    ya había llegado para él. Si no hay INTEROP_SECRETO_FEDERADO, o algo falla, el paciente se crea igual.
+    """
+    try:
+        with db.begin_nested():
+            sid = interop.asignar_sid(db, paciente_id, tipo_documento, documento)
+            if sid:
+                interop.conciliar(db, sid)
+    except Exception:  # noqa: BLE001 -- la interoperabilidad nunca impide registrar a un paciente
+        log.exception("No se pudo federar al paciente")
 
 
 def _publicar_en_fhir(db: Session, p: Paciente) -> None:
@@ -202,7 +223,7 @@ def _sin_tildes(t: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", t.lower()) if unicodedata.category(c) != "Mn")
 
 
-@router.get("/sugerir", summary="Buscar pacientes por nombre o documento (autocompletar)")
+@router.get("/sugerir", summary="Buscar pacientes por nombre, documento, teléfono o correo (autocompletar)")
 def sugerir(q: str = Query(..., min_length=3, max_length=60),
             ctx: ContextoAcceso = Depends(RequierePermiso("paciente", "read")),
             db: Session = Depends(get_db)):
@@ -211,13 +232,20 @@ def sugerir(q: str = Query(..., min_length=3, max_length=60),
     buscar con LIKE. Si se escriben solo dígitos, se busca el documento exacto
     con el índice ciego; si no, se comparan las palabras con los nombres
     descifrados en memoria, solo entre los pacientes que el usuario puede ver.
-    Devuelve 10 como máximo, con el documento enmascarado.
+    El teléfono y el correo (completos) también se buscan con su índice ciego, sin descifrar: un correo
+    si trae "@"; un número si no hay documento con esos dígitos. Una familia puede compartir teléfono,
+    por eso puede haber varios. Devuelve 10 como máximo, con el documento enmascarado.
     """
     texto = q.strip()
     base = ctx.filtrar_query(db.query(Paciente).filter(Paciente.activo.is_(True)), Paciente)
-    if texto.isdigit():
-        p = base.filter(Paciente.documento_bidx == blind_index(texto, "pacientes.documento")).first()
+    solo_numero = re.sub(r"[\s+\-()]", "", texto)
+    if "@" in texto:
+        candidatos = base.filter(Paciente.email_bidx == blind_index_contacto(texto, "pacientes.email")).limit(10).all()
+    elif solo_numero.isdigit():
+        p = base.filter(Paciente.documento_bidx == blind_index(solo_numero, "pacientes.documento")).first()
         candidatos = [p] if p else []
+        if not candidatos and len(solo_numero) >= 7:
+            candidatos = base.filter(Paciente.telefono_bidx == blind_index_contacto(texto, "pacientes.telefono")).limit(10).all()
     else:
         palabras = _sin_tildes(texto).split()
         candidatos = []
@@ -298,6 +326,8 @@ def actualizar(paciente_id: str, datos: PacienteActualizar, request: Request,
         if campo in ("nombre", "apellido", "telefono", "email", "direccion"):
             col = "direccion_cifrada" if campo == "direccion" else f"{campo}_cifrado"
             cambios[col] = cifrar(valor, f"pacientes.{campo}")
+            if campo in ("telefono", "email"):      # el índice ciego se mantiene al día con el dato
+                cambios[f"{campo}_bidx"] = blind_index_contacto(valor, f"pacientes.{campo}")
         else:
             cambios[campo] = valor
 

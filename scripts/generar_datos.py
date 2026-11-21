@@ -37,7 +37,7 @@ import numpy as np
 from faker import Faker
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from app.core.crypto import blind_index, cifrar, generar_clave  # noqa: E402
+from app.core.crypto import blind_index, blind_index_contacto, cifrar, generar_clave  # noqa: E402
 from app.core.security import hash_password  # noqa: E402
 
 fake = Faker("es_CO")
@@ -153,14 +153,18 @@ def gen_usuarios_y_personal():
             # NO se almacena la dirección (Ley 1581/2012).
             desplazamiento = int(np.clip(np.random.lognormal(3.1, 0.5), 8, 95))
 
+            telefono = fake.phone_number()[:20]
+            correo = f"{nombre.lower()}.{apellido.lower()}@hsanrafael.co"
             personal_filas.append((
                 pid,
                 cifrar(doc, "personal.documento"),
                 blind_index(doc, "personal.documento"),
                 cifrar(nombre, "personal.nombre"),
                 cifrar(apellido, "personal.apellido"),
-                cifrar(fake.phone_number()[:20], "personal.telefono"),
-                cifrar(f"{nombre.lower()}.{apellido.lower()}@hsanrafael.co", "personal.email"),
+                cifrar(telefono, "personal.telefono"),
+                cifrar(correo, "personal.email"),
+                blind_index_contacto(telefono, "personal.telefono"),
+                blind_index_contacto(correo, "personal.email"),
                 esp_id,
                 tipo,
                 desplazamiento,
@@ -179,6 +183,7 @@ def gen_usuarios_y_personal():
     insert("personal",
            ["id", "documento_cifrado", "documento_bidx", "nombre_cifrado",
             "apellido_cifrado", "telefono_cifrado", "email_cifrado",
+            "telefono_bidx", "email_bidx",
             "especialidad_id", "tipo_personal", "tiempo_desplazamiento_min",
             "turno_habitual"],
            personal_filas)
@@ -301,13 +306,15 @@ def gen_pacientes(n: int) -> list[str]:
         else:
             tipo_documento = random.choices(["CC", "CE"], weights=[93, 7])[0]
 
+        telefono = fake.phone_number()[:20]
         filas.append((
             bidx,
             tipo_documento,
             cifrar(doc, "pacientes.documento"),
             cifrar(nombre, "pacientes.nombre"),
             cifrar(apellido, "pacientes.apellido"),
-            cifrar(fake.phone_number()[:20], "pacientes.telefono"),
+            cifrar(telefono, "pacientes.telefono"),
+            blind_index_contacto(telefono, "pacientes.telefono"),
             cifrar(fake.address().replace("\n", ", ")[:120], "pacientes.direccion"),
             (datetime.now() - timedelta(days=edad * 365 + random.randint(0, 364))).date(),
             sexo,
@@ -320,7 +327,7 @@ def gen_pacientes(n: int) -> list[str]:
 
     insert("pacientes",
            ["documento_bidx", "tipo_documento", "documento_cifrado",
-            "nombre_cifrado", "apellido_cifrado", "telefono_cifrado",
+            "nombre_cifrado", "apellido_cifrado", "telefono_cifrado", "telefono_bidx",
             "direccion_cifrada", "fecha_nacimiento", "sexo", "eps_id",
             "tiene_comorbilidades", "riesgo_asa", "consentimiento_datos"],
            filas)
