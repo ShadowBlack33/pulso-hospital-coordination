@@ -4,6 +4,9 @@ Rendimiento del sistema, para el admin.
   GET /admin/rendimiento   API (latencia y errores), seguridad (logins,
                            bloqueos, accesos denegados), uso por perfil,
                            servicios conectados y métricas del modelo de IA.
+  GET /admin/auditoria/cadena      Los últimos registros de la auditoría con sus huellas.
+  GET /admin/auditoria/verificar   Recalcula la cadena de huellas y dice si está íntegra
+                                   (docs/SEGURIDAD.md §7.5).
 
 Todo es agregado: no aparece ningún paciente. Solo quien puede leer la
 auditoría (admin) lo consulta.
@@ -11,13 +14,14 @@ auditoría (admin) lo consulta.
 from __future__ import annotations
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.deps import ContextoAcceso, RequierePermiso, get_db
-from app.services import metricas
+from app.services import auditoria_cadena, metricas
+from app.services.auditoria import registrar
 
 router = APIRouter(prefix="/admin", tags=["Administración"])
 settings = get_settings()
@@ -77,3 +81,28 @@ def rendimiento(ctx: ContextoAcceso = Depends(RequierePermiso("auditoria", "read
 
     return {"api": metricas.resumen(), "seguridad": seg, "denegados": denegados,
             "uso_por_perfil": uso, "acciones_24h": acciones, "ia": ia}
+
+
+@router.get("/auditoria/cadena", summary="Últimos registros de la auditoría con sus huellas (solo admin)")
+def cadena_auditoria(limite: int = Query(20, ge=1, le=200),
+                     ctx: ContextoAcceso = Depends(RequierePermiso("auditoria", "read")),
+                     db: Session = Depends(get_db)):
+    return {"registros": auditoria_cadena.ultimos_registros(db, limite)}
+
+
+@router.get("/auditoria/verificar", summary="Verificar que la cadena de auditoría no fue alterada (solo admin)")
+def verificar_auditoria(ultimos: int | None = Query(None, ge=1, le=5_000_000,
+                                                    description="Revisar solo los últimos N registros"),
+                        ctx: ContextoAcceso = Depends(RequierePermiso("auditoria", "read")),
+                        db: Session = Depends(get_db)):
+    """
+    Recalcula cada huella con la clave de auditoría. Si algún registro se editó, se borró o se movió,
+    dice cuál es el primero roto. Guarde `ultima_huella` y `total` aparte: así también se detecta que
+    alguien borre los últimos registros. La verificación queda registrada en la propia auditoría.
+    """
+    r = auditoria_cadena.verificar(db, ultimos)
+    registrar(db, ctx.usuario, "auditoria", None, "verificar_cadena",
+              valor_nuevo={"integra": r["integra"], "total": r["total"], "problemas": len(r["problemas"])},
+              resultado="exito" if r["integra"] else "error", request=ctx.request)
+    db.commit()
+    return r

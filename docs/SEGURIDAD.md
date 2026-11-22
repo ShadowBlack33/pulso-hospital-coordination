@@ -89,6 +89,23 @@ documento_bidx = HMAC-SHA256(clave_indice, "pacientes.documento|1144098765")
 búsquedas parciales ni por rango. Es un compromiso consciente: para este
 sistema, buscar un paciente por su documento completo cubre el caso de uso.
 
+### 3.1 También el teléfono y el correo (semana 14)
+
+El documento no es el único dato por el que se busca. `pacientes` y `personal`
+tienen ahora `telefono_bidx` y `email_bidx` (`db/05_seguridad_e_interop.sql`),
+con la misma clave de índice y un prefijo por tabla y campo
+(`pacientes.telefono|3001234567`), de modo que el mismo valor en dos campos no
+produce el mismo índice. Se normaliza antes de indexar: del teléfono se quedan
+los dígitos y se quita el `00` y el indicativo `57` (`+57 300 123 4567` =
+`300-123-4567`); el correo va en minúsculas y **conserva los puntos**
+(`a.b@x.co` y `ab@x.co` son cuentas distintas). Dos diferencias con el
+documento, a propósito: **no son únicos** (una familia comparte teléfono), por
+eso son índices normales y no llaves, y la búsqueda del autocompletar es
+exacta (un teléfono a medias no adivina). Nunca salen en la auditoría
+(`<protegido>`) ni en el historial de cambios (`<cifrado>`). Los datos ya
+cargados se indexan una vez con `python scripts/reindexar_contacto.py`
+(`--simular` cuenta sin escribir).
+
 ---
 
 ## 4. Contraseñas
@@ -132,6 +149,21 @@ datos. El refresh **rota en cada uso**: el anterior queda revocado, de forma
 que reutilizar un refresh robado es detectable.
 
 Al cambiar la contraseña se revocan todas las sesiones activas del usuario.
+
+**Qué lleva el JWT (semana 14).** Solo lo que el servidor necesita para
+autorizar: `sub` (id), `rol`, `permisos`, `personal_id`, `paciente_id`, `sid`
+(la sesión, para revocar de inmediato), `type`, `iat`, `exp` y `jti`. Ya **no lleva
+el `username`**: quien copie un token no aprende quién es. Se mantiene a
+sabiendas que `permisos` viaja dentro: si el admin cambia los permisos de un
+rol, el token vigente los conserva hasta 15 minutos (la alternativa, consultar
+la base en cada petición, se descartó por costo). El algoritmo está fijado en
+HS256 en la verificación: no se acepta `none` ni otro.
+
+La puerta de interoperabilidad (`docs/INTEROP.md`) emite tokens aparte
+(OAuth2 `client_credentials`, 10 minutos, `aud=pulso-interop`, `type=interop`,
+con scope). Ninguno de los dos tipos abre la puerta del otro, y `aud`, `iss`
+y `exp` se exigen explícitamente: la biblioteca JWT acepta por defecto un
+token sin `aud`, y una prueba (`test_interop.py`) lo cubre.
 
 ---
 
@@ -190,6 +222,42 @@ no los valores, para no crear una copia en claro por la puerta de atrás.
 
 Reservada exclusivamente al rol `admin`, mediante el permiso
 `recurso:restore`. Un médico puede eliminar lo que creó, pero no revertirlo.
+
+### 7.5 Cadena de huellas: la bitácora que se puede verificar
+
+El trigger impide editar o borrar *desde la aplicación*; no impide que alguien
+con acceso directo a la base (un administrador de base de datos, o quien robe
+la contraseña de Neon) lo desactive, edite un registro y lo vuelva a activar.
+Por eso, desde la semana 14 cada registro lleva una huella encadenada
+(`db/05_seguridad_e_interop.sql`):
+
+```
+huella = HMAC-SHA256(APP_AUDIT_KEY, huella_anterior || "|" || JSON canónico del registro)
+```
+
+El primer registro encadena con 64 ceros. Editar un registro cambia su huella;
+borrar uno rompe el enlace del siguiente; reordenar o colar uno sin huella se ve.
+Un atacante que **recalcule toda la cadena** con SHA-256 simple tampoco sirve:
+sin la clave HMAC, que **no está en la base**, las huellas no coinciden. La
+clave es `APP_AUDIT_KEY`; si no se define, se deriva con HKDF de
+`APP_ENCRYPTION_KEY` (funciona, pero con clave propia filtrar una no compromete
+la otra).
+
+El sellado ocurre en un `before_flush` de SQLAlchemy, dentro de la misma
+transacción que el registro, bajo un bloqueo (`pg_advisory_xact_lock`) y con el
+id tomado de la secuencia al sellar: la cadena sigue el orden real de
+confirmación, un rollback no deja huecos y 8 hilos escribiendo a la vez la
+mantienen íntegra (prueba). El admin la verifica con
+`GET /admin/auditoria/verificar` (permiso `auditoria:read`; la propia
+verificación queda registrada) y revisa los últimos con `GET /admin/auditoria/cadena`.
+
+**Limitación declarada:** borrar los **últimos** registros no rompe ningún
+enlace (no hay un siguiente que apunte a ellos). Se detecta comparando el
+`total` y la `ultima_huella` que devuelve la verificación con una copia
+guardada aparte (por ejemplo, en el informe semanal). Los registros anteriores
+a la migración no tienen huella y se cuentan aparte. Las pruebas
+(`test_auditoria_cadena.py`) simulan al atacante dentro de transacciones que
+se deshacen y se niegan a correr contra una base que no sea local.
 
 ---
 
@@ -285,7 +353,13 @@ Reconocerlas explícitamente es parte del rigor del trabajo:
    No se migró a mitad del corte porque afecta nueve llaves foráneas.
 9. **El cobro es una referencia interna**, no un RIPS ni una factura
    electrónica de venta (FEV) validada ante la DIAN.
-10. **Radiografías de cohorte externa.** Las imágenes del PACS son reales
+10. **La cadena de auditoría no detecta el borrado de los últimos registros**
+    ni protege si el atacante tiene también `APP_AUDIT_KEY`. Ver 7.5.
+11. **El identificador federado es un seudónimo** reversible por fuerza bruta
+    para quien tenga el secreto federado, y la puerta de interoperabilidad usa
+    secretos compartidos (HS256 / HMAC), no firmas asimétricas ni mTLS. Ver
+    `docs/INTEROP.md` §12.
+12. **Radiografías de cohorte externa.** Las imágenes del PACS son reales
     (NIH ChestX-ray14) pero vinculadas a pacientes sintéticos para mostrar el
     visor; no son exámenes de esos pacientes.
 
