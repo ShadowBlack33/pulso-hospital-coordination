@@ -34,6 +34,9 @@ SCOPE_REMISION = "system/ServiceRequest.write"     # enviarnos una remisión (Bu
 SCOPE_TASK = "system/Task.write"                   # respondernos una remisión (Task)
 SCOPES_VALIDOS = {SCOPE_OBSERVATION, SCOPE_REMISION, SCOPE_TASK}
 TODOS_LOS_SCOPES = " ".join(sorted(SCOPES_VALIDOS))
+# Otros equipos nombran sus permisos a su manera; se traducen a los nuestros en vez de rechazar el token.
+ALIAS_SCOPES = {"bundle:write": SCOPE_REMISION, "servicerequest:write": SCOPE_REMISION, "remision:write": SCOPE_REMISION,
+                "task:write": SCOPE_TASK, "observation:write": SCOPE_OBSERVATION}
 
 # Ruta que se firma: la de la API, sin el prefijo /api que pone nginx (así la firma no depende del proxy).
 RUTA_OBSERVATION = "/interop/Observation"
@@ -126,9 +129,10 @@ def emitir_token(db, grant_type: str, client_id: str, client_secret: str, scope:
         raise ErrorInterop(400, "Solo se admite client_credentials", oauth="unsupported_grant_type")
     cliente = autenticar_cliente(db, client_id, client_secret)
     permitidos = set(cliente["scopes"].split())
-    pedidos = set((scope or cliente["scopes"]).split())
-    if not pedidos or not pedidos <= permitidos:
+    pedidos = {ALIAS_SCOPES.get(s.lower(), s) for s in (scope or "").split()}
+    if any(s.startswith("system/") and s not in permitidos for s in pedidos):
         raise ErrorInterop(400, "Scope no permitido para este cliente", oauth="invalid_scope")
+    pedidos = (pedidos & permitidos) or permitidos      # un nombre ajeno (openid, read...) no tumba el token
     cfg = get_settings()
     ahora = datetime.now(timezone.utc)
     minutos = cfg.interop_token_minutos
@@ -337,4 +341,15 @@ def autenticar_entrada(db, autorizacion: str | None, api_key: str | None, cabece
         raise ErrorInterop(401, "Cliente inactivo", "security")
     if exige or cabeceras.get("firma"):          # si viene firma, se verifica aunque no se exija
         verificar_firma(db, cid, cabeceras, metodo, ruta, cuerpo)
+    elif cabeceras.get("nonce"):                 # sin firma pero con x-nonce: igual impedimos el replay
+        nonce = cabeceras["nonce"]
+        if not _NONCE.match(nonce):
+            raise ErrorInterop(400, "x-nonce inválido (16 a 128 caracteres: letras, números, _ y -)", "invalid")
+        db.execute(text("DELETE FROM interop_nonces WHERE expira < now()"))
+        nuevo = db.execute(text("""INSERT INTO interop_nonces (client_id, nonce, expira)
+                                   VALUES (:c, :n, now() + interval '1 day') ON CONFLICT DO NOTHING RETURNING 1"""),
+                           {"c": cid, "n": nonce}).first()
+        if not nuevo:
+            raise ErrorInterop(409, "x-nonce repetido: este mensaje ya se había enviado", "duplicate")
+        db.commit()                              # el nonce se gasta aunque el Bundle se rechace
     return cid

@@ -232,6 +232,10 @@ try:
           and "3457005" in enviado, tipos)
     check("Minimización: ni teléfono, ni correo, ni dirección salen hacia el socio",
           "3109998877" not in enviado and "luis.saliente" not in enviado and "Falsa" not in enviado)
+    ents = capturado.get("/interop/Bundle", {}).get("entry", [])
+    check("Todo va con PUT e ids estables, con Consent y Task 'requested' (contratos tipo R30)",
+          all(x["request"]["method"] == "PUT" for x in ents) and "Consent" in tipos and "Task" in tipos
+          and any(x["resource"]["resourceType"] == "ServiceRequest" and x["resource"]["id"] == f"rem-{sal['id']}" for x in ents), tipos)
 
     print("\n[6] Ida y vuelta: B acepta → A se entera")
     ent = db.execute(text("SELECT * FROM remisiones WHERE direccion = 'entrante' AND id_externo = :x"),
@@ -275,7 +279,70 @@ try:
     r = httpx.post(f"{B}/interop/Bundle", content=cuerpo_b, headers=cab)
     check("La misma firma otra vez (replay) → 401", r.status_code == 401, r.text)
 
-    print("\n[9] Admin y auditoría")
+    print("\n[9] Bundle con la forma de un socio real (contrato R30 del grupo de triaje)")
+    tok2 = httpx.post(f"{B}/oauth/token", data={"grant_type": "client_credentials", "client_id": cliente["client_id"],
+                                                "client_secret": cliente["client_secret"], "scope": "bundle:write task:write"})
+    check("Pide el token con sus scopes (bundle:write task:write) → 200", tok2.status_code == 200, tok2.text)
+    SOC = {"Authorization": f"Bearer {tok2.json()['access_token']}", "Content-Type": "application/fhir+json",
+           "x-nonce": secrets.token_hex(16)}
+    sid, tid, pidx = f"r30-sr-{SUF}", f"r30-task-{SUF}", f"r30-pac-{SUF}"
+
+    def put(rec):
+        return {"fullUrl": f"urn:uuid:{rec['resourceType']}-{rec['id']}", "resource": rec,
+                "request": {"method": "PUT", "url": f"{rec['resourceType']}/{rec['id']}"}}
+    real = {"resourceType": "Bundle", "type": "transaction", "entry": [
+        put({"resourceType": "Patient", "id": pidx, "gender": "male", "birthDate": "1971"}),
+        put({"resourceType": "Consent", "id": f"r30-con-{SUF}", "status": "active",
+             "scope": {"coding": [{"code": "patient-privacy"}]}, "category": [{"text": "Interoperabilidad"}],
+             "patient": {"reference": f"Patient/{pidx}"}, "provision": {"type": "permit", "period": {"start": "2026-11-01"}}}),
+        put({"resourceType": "ServiceRequest", "id": sid, "status": "active", "intent": "order", "priority": "urgent",
+             "code": {"coding": [{"system": "http://snomed.info/sct", "code": "306206005", "display": "Referral to service"}]},
+             "subject": {"reference": f"Patient/{pidx}"}, "performerType": {"text": "Cardiología"},
+             "reasonCode": [{"text": "Triaje II: dolor torácico con PA elevada"}]}),
+        put({"resourceType": "Task", "id": tid, "status": "requested", "intent": "order",
+             "focus": {"reference": f"ServiceRequest/{sid}"}, "for": {"reference": f"Patient/{pidx}"}}),
+        put({"resourceType": "Observation", "id": f"r30-pa-{SUF}", "status": "final",
+             "code": {"coding": [{"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel"}]},
+             "subject": {"reference": f"Patient/{pidx}"}, "effectiveDateTime": "2026-11-21T09:00:00-05:00",
+             "component": [{"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+                            "valueQuantity": {"value": 168, "unit": "mm[Hg]", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}},
+                           {"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4"}]},
+                            "valueQuantity": {"value": 98, "unit": "mm[Hg]", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}}]}),
+        put({"resourceType": "Observation", "id": f"r30-fc-{SUF}", "status": "final",
+             "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+             "subject": {"reference": f"Patient/{pidx}"},
+             "valueQuantity": {"value": 112, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}})]}
+    r = httpx.post(f"{B}/interop/Bundle", json=real, headers=SOC)
+    check("Paciente seudonimizado + Consent + Task + Observation con componentes → 201", r.status_code == 201, r.text)
+    nueva = r.json().get("id")
+    otro = json.loads(json.dumps(real).replace(sid, sid + "b"))
+    r2 = httpx.post(f"{B}/interop/Bundle", json=otro, headers=SOC)
+    check("El mismo x-nonce con otra remisión → 409 (anti-replay sin firma)", r2.status_code == 409 and "nonce" in r2.text, r2.text)
+    r2 = httpx.post(f"{B}/interop/Bundle", json=otro, headers={**SOC, "x-nonce": "corto"})
+    check("x-nonce inválido → 400", r2.status_code == 400, r2.text)
+    if nueva:
+        rem2 = db.execute(text("SELECT * FROM remisiones WHERE id = :i"), {"i": int(nueva)}).mappings().first()
+        check("Guardamos sus ids (ServiceRequest y Task) para responderles",
+              rem2["datos_externos"].get("sr_id") == sid and rem2["datos_externos"].get("task_id") == tid, rem2["datos_externos"])
+        check("Sus observaciones quedaron en la historia", cuenta("observaciones", "paciente_id = :p", p=rem2["paciente_id"]) >= 2)
+        enviados: list = []
+
+        def espia2(socio, ruta, recurso):
+            enviados.append((ruta, recurso))
+            return original(socio, ruta, recurso)
+        RX._post_socio = espia2
+        e3 = login(db.execute(text("SELECT username FROM usuarios WHERE personal_id = :p AND activo LIMIT 1"),
+                              {"p": rem2["especialista_id"]}).scalar())
+        r = httpx.post(f"{B}/remisiones/{nueva}/aceptar", headers=e3)
+        time.sleep(2.5)
+        tarea = next((x[1] for x in enviados if x[1].get("resourceType") == "Task"), {})
+        check("Al aceptar, el Task de respuesta apunta a SU ServiceRequest y SU Task",
+              r.status_code == 200 and tarea.get("status") == "accepted" and tarea.get("id") == tid
+              and tarea.get("focus", {}).get("reference") == f"ServiceRequest/{sid}"
+              and tarea.get("for", {}).get("reference") == f"Patient/{pidx}", tarea)
+        RX._post_socio = original
+
+    print("\n[10] Admin y auditoría")
     adm = login("admin")
     r = httpx.patch(f"{B}/admin/interop/socios/{CODIGO}", headers=adm, json={"base_url": B + "/"})
     check("El admin cambia la URL del socio sin redesplegar (y no ve secretos)",

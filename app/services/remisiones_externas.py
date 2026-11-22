@@ -162,17 +162,23 @@ def _nombre(pat: dict) -> tuple[str, str] | None:
 
 def _validar_paciente(pat: dict, errores: list[str]) -> dict:
     doc, sid, nombre = _documento(pat), _federado(pat), _nombre(pat)
+    seudonimo = None
     if not doc and not sid:
-        errores.append("Patient.identifier debe traer el documento de identidad (con su tipo: CC, TI, CE, PA...) "
-                       f"o el identificador federado ({I.SYS_FEDERADO})")
+        # Paciente seudonimizado (sin nombre ni documento): se acepta con su id o su primer identifier.
+        ident = next((i for i in pat.get("identifier") or [] if isinstance(i, dict) and i.get("value")), None)
+        seudonimo = str(ident["value"]) if ident else (str(pat["id"]) if pat.get("id") else None)
+        if not seudonimo:
+            errores.append("Patient debe traer un documento de identidad (con su tipo), el identificador federado "
+                           f"({I.SYS_FEDERADO}) o al menos un id o identifier seudonimizado")
     nacimiento = None
     if pat.get("birthDate"):
         try:
-            nacimiento = date.fromisoformat(str(pat["birthDate"])[:10])
+            f = str(pat["birthDate"])[:10]                  # FHIR admite AAAA, AAAA-MM o AAAA-MM-DD
+            nacimiento = date.fromisoformat({4: f + "-01-01", 7: f + "-01"}.get(len(f), f))
         except ValueError:
-            errores.append("Patient.birthDate debe ser una fecha AAAA-MM-DD")
+            errores.append("Patient.birthDate debe ser una fecha AAAA, AAAA-MM o AAAA-MM-DD")
     sexo = {"male": "M", "female": "F", "other": "O", "unknown": "O"}.get(str(pat.get("gender") or ""), None)
-    return {"doc": doc, "sid": sid, "nombre": nombre, "nacimiento": nacimiento, "sexo": sexo}
+    return {"doc": doc, "sid": sid, "nombre": nombre, "nacimiento": nacimiento, "sexo": sexo, "seudonimo": seudonimo}
 
 
 def _paciente(db, datos: dict, errores: list[str], usuario_sistema: int) -> tuple[str | None, bool]:
@@ -202,9 +208,25 @@ def _paciente(db, datos: dict, errores: list[str], usuario_sistema: int) -> tupl
              "a": cifrar(apellido, "pacientes.apellido"), "f": datos["nacimiento"], "s": datos["sexo"], "u": usuario_sistema})
         I.asignar_sid(db, bidx, tipo, numero)
         return bidx, True
-    errores.append("El paciente federado no existe en Pulso: envíe también su documento de identidad, nombre, "
-                   "fecha de nacimiento y sexo")
-    return None, False
+    # Sin documento ni id federado conocido: el socio minimizó (R32) y mandó un paciente SEUDONIMIZADO.
+    # Se registra con su seudónimo como identificador externo; si vuelve a llegar, es el mismo paciente.
+    seudonimo = datos.get("seudonimo") or datos.get("sid")
+    if not seudonimo:
+        errores.append("Patient necesita un id o un identifier (aunque sea un seudónimo) para poder registrarlo")
+        return None, False
+    numero = re.sub(r"[^0-9A-Za-z]", "", seudonimo)[:40] or "X"
+    bidx = blind_index(f"EXT{numero}", "pacientes.documento")
+    if db.execute(text("SELECT 1 FROM pacientes WHERE documento_bidx = :b"), {"b": bidx}).first():
+        return bidx, False
+    dados, apellido = datos["nombre"] or ("Paciente", f"externo {numero[:12]}")
+    db.execute(text("""
+        INSERT INTO pacientes (documento_bidx, tipo_documento, documento_cifrado, nombre_cifrado, apellido_cifrado,
+                               fecha_nacimiento, sexo, created_by)
+        VALUES (:b, 'EXT', :d, :n, :a, :f, :s, :u)"""),
+        {"b": bidx, "d": cifrar(f"EXT{numero}", "pacientes.documento"), "n": cifrar(dados, "pacientes.nombre"),
+         "a": cifrar(apellido, "pacientes.apellido"), "f": datos["nacimiento"] or date(1900, 1, 1),
+         "s": datos["sexo"] or "O", "u": usuario_sistema})
+    return bidx, True
 
 
 # =============================================================== especialidad
@@ -291,13 +313,10 @@ def validar_bundle(bundle) -> tuple[list[str], dict]:
         if not loinc:
             e.append(f"Observation {oid}: code.coding debe traer un código LOINC ({fhir_svc.SYS_LOINC})")
         q = o.get("valueQuantity")
-        if q is not None:
-            if isinstance(q.get("value"), bool) or not isinstance(q.get("value"), (int, float)):
-                e.append(f"Observation {oid}: valueQuantity.value debe ser un número")
-            elif q.get("system") != fhir_svc.SYS_UCUM or not q.get("code"):
-                e.append(f"Observation {oid}: la unidad debe ser UCUM (system {fhir_svc.SYS_UCUM} y code)")
-        elif not o.get("valueString") and not o.get("valueCodeableConcept"):
-            e.append(f"Observation {oid}: falta el valor (valueQuantity con UCUM, valueString o valueCodeableConcept)")
+        if q is not None and (isinstance(q.get("value"), bool) or not isinstance(q.get("value"), (int, float))):
+            e.append(f"Observation {oid}: valueQuantity.value debe ser un número")
+        elif q is None and not (o.get("valueString") or o.get("valueCodeableConcept") or o.get("component")):
+            e.append(f"Observation {oid}: falta el valor (valueQuantity, valueString, valueCodeableConcept o component)")
         if ((o.get("subject") or {}).get("reference") or "") not in claves_p:
             e.append(f"Observation {oid}: subject debe referenciar al Patient del Bundle")
         if o.get("status") not in ("final", "amended", "corrected", "preliminary"):
@@ -317,8 +336,32 @@ def validar_bundle(bundle) -> tuple[list[str], dict]:
             e.append("DiagnosticReport.subject debe referenciar al Patient del Bundle")
 
     datos_p = _validar_paciente(pat, e)
+    tarea = next((r for _, r in por_tipo.get("Task", [])), None)
+    consent = next((r for _, r in por_tipo.get("Consent", [])), None)
+    if consent is not None and consent.get("status") not in (None, "active"):
+        e.append("Consent.status debe ser 'active': sin consentimiento vigente no se recibe la remisión")
     return e, {"pat": datos_p, "sr": sr, "id_ext": id_ext, "motivo": motivo.strip()[:1000],
-               "prioridad": prioridad, "obs": obs_validas, "dr": dr}
+               "prioridad": prioridad, "obs": obs_validas, "dr": dr,
+               "task_id": tarea.get("id") if tarea else None, "patient_id": pat.get("id"),
+               "consent": {"estado": consent.get("status"), "tipo": (consent.get("provision") or {}).get("type")} if consent else None}
+
+
+def _aplanar_observacion(o: dict) -> dict:
+    """Signos vitales con componentes (presión arterial) → un texto legible; unidad no UCUM → la que traiga."""
+    o = dict(o)
+    if o.get("valueQuantity") is None and o.get("component"):
+        partes = []
+        for c in o["component"]:
+            q = c.get("valueQuantity") or {}
+            if q.get("value") is not None:
+                partes.append(f"{_texto(c.get('code') or {}) or 'valor'}: {q.get('value')} {q.get('unit') or q.get('code') or ''}".strip())
+        o["valueString"] = "; ".join(partes)[:200] or None
+    elif o.get("valueQuantity") is None and o.get("valueCodeableConcept"):
+        o["valueString"] = _texto(o["valueCodeableConcept"])[:200]
+    q = o.get("valueQuantity")
+    if q and not q.get("code"):
+        o["valueQuantity"] = {**q, "code": q.get("unit") or "1"}
+    return o
 
 
 def recibir_bundle(db, client_id: str, bundle, request=None) -> tuple[int, dict]:
@@ -361,13 +404,21 @@ def recibir_bundle(db, client_id: str, bundle, request=None) -> tuple[int, dict]
 
     guardadas = 0
     for oid, o in partes["obs"]:
-        if fhir_reactivo.guardar_resultado(db, o, paciente_id, f"{client_id}:{oid}"[:64]):
-            guardadas += 1
+        o = _aplanar_observacion(o)
+        try:
+            with db.begin_nested():
+                if fhir_reactivo.guardar_resultado(db, o, paciente_id, f"{client_id}:{oid}"[:64]):
+                    guardadas += 1
+        except Exception:  # noqa: BLE001 -- un resultado que no se pudo guardar no tumba la remisión
+            log.warning("Observation %s del socio no se guardó", oid)
     dr = partes["dr"]
     datos = {"socio": socio["nombre"] if socio else client_id, "socio_codigo": socio["codigo"] if socio else None,
              "institucion": ((partes["sr"].get("requester") or {}).get("display")),
              "solicitante": ((partes["sr"].get("requester") or {}).get("display")),
              "service_request": partes["id_ext"], "codigo": _texto(partes["sr"].get("code") or {}),
+             # Para responder con referencias que el socio entienda (ServiceRequest/<id>, Task/<id>, Patient/<id>).
+             "sr_id": partes["sr"].get("id"), "task_id": partes.get("task_id"), "patient_id": partes.get("patient_id"),
+             "consentimiento_socio": partes.get("consent"),
              "observaciones": guardadas, "paciente_nuevo": creado, "recibida_at": _ahora(),
              "diagnostic_report": {"estado": dr.get("status"), "codigo": _texto(dr.get("code") or {}),
                                    "conclusion": str(dr.get("conclusion") or "")[:2000]} if dr else None}
@@ -498,11 +549,12 @@ def _cabeceras(socio: dict, cliente: httpx.Client, ruta: str, cuerpo: bytes) -> 
         cab["Authorization"] = f"Bearer {secreto}"
     elif modo == "api_key":
         cab[socio["api_key_cabecera"] or "X-API-Key"] = secreto
+    # Nonce y hora en TODOS los mensajes: varios socios los exigen aunque no firmen (anti-replay).
+    ts, nonce = str(int(time.time())), secrets.token_urlsafe(18)
+    cab.update({I.CABECERAS["timestamp"]: ts, I.CABECERAS["nonce"]: nonce})
     if socio.get("firma_secreto_cifrado"):
         firma = descifrar(bytes(socio["firma_secreto_cifrado"]), f"interop_socios.firma.{socio['codigo']}")
-        ts, nonce = str(int(time.time())), secrets.token_urlsafe(18)
-        cab.update({I.CABECERAS["timestamp"]: ts, I.CABECERAS["nonce"]: nonce,
-                    I.CABECERAS["firma"]: I.firmar(firma, ts, nonce, "POST", ruta, cuerpo)})
+        cab[I.CABECERAS["firma"]] = I.firmar(firma, ts, nonce, "POST", ruta, cuerpo)
     return cab
 
 
@@ -534,12 +586,24 @@ def _observaciones_relevantes(db, paciente_id: str, ids: list[int] | None) -> li
     return [dict(f) for f in filas.mappings().all()]
 
 
-def construir_bundle(db, r: dict, reporte: dict | None, obs: list[dict]) -> dict:
-    """Bundle transaction mínimo (R32): sin teléfono, correo ni dirección."""
+def construir_bundle(db, r: dict, reporte: dict | None, obs: list[dict], consentimiento: dict | None = None) -> dict:
+    """
+    Bundle transaction mínimo (R32): sin teléfono, correo ni dirección. Todo va con PUT e ids ESTABLES
+    (rem-<n>, pac-<…>, …) para que el socio nos pueda responder apuntando a ServiceRequest/rem-<n> o Task/rem-<n>.
+    Lleva el Consent del paciente para esa institución y un Task 'requested' (lo piden varios contratos).
+    """
     p = db.execute(text("SELECT * FROM pacientes WHERE documento_bidx = :p"), {"p": r["paciente_id"]}).mappings().first()
     doc = descifrar(bytes(p["documento_cifrado"]), "pacientes.documento")
-    u_pac = f"urn:uuid:{uuid.uuid4()}"
-    paciente = {"resourceType": "Patient",
+    n = r["id"]
+    id_pac = f"pac-{p['sid_federado'] or r['paciente_id'].strip()[:24]}"[:64]
+    ref_pac, ref_sr, ref_task = f"Patient/{id_pac}", f"ServiceRequest/rem-{n}", f"Task/rem-{n}"
+
+    def entrada(recurso: dict) -> dict:
+        tipo, rid = recurso["resourceType"], recurso["id"]
+        return {"fullUrl": f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'pulso/{tipo}/{rid}')}",
+                "resource": recurso, "request": {"method": "PUT", "url": f"{tipo}/{rid}"}}
+
+    paciente = {"resourceType": "Patient", "id": id_pac,
                 "identifier": [{"use": "official",
                                 "type": {"coding": [{"system": SYS_TIPO_DOC, "code": p["tipo_documento"]}], "text": p["tipo_documento"]},
                                 "system": SYS_DOC, "value": doc}],
@@ -549,16 +613,16 @@ def construir_bundle(db, r: dict, reporte: dict | None, obs: list[dict]) -> dict
                 "birthDate": p["fecha_nacimiento"].isoformat()}
     if p.get("sid_federado"):
         paciente["identifier"].append({"use": "secondary", "system": I.SYS_FEDERADO, "value": p["sid_federado"]})
-    entradas = [{"fullUrl": u_pac, "resource": paciente, "request": {"method": "POST", "url": "Patient"}}]
+    entradas = [entrada(paciente)]
     soporte = []
     for o in obs:
-        u = f"urn:uuid:{uuid.uuid4()}"
-        recurso = {"resourceType": "Observation", "identifier": [{"system": SYS_OBS_EXT, "value": str(o["id"])}],
+        recurso = {"resourceType": "Observation", "id": f"obs-{o['id']}",
+                   "identifier": [{"system": SYS_OBS_EXT, "value": str(o["id"])}],
                    "status": "final",
                    "category": [{"coding": [{"system": fhir_svc.SYS_OBS_CAT, "code": o.get("categoria") or "laboratory"}]}],
                    "code": {"coding": [{"system": fhir_svc.SYS_LOINC, "code": o["codigo_loinc"],
                                         "display": o.get("display_loinc") or o["codigo_loinc"]}]},
-                   "subject": {"reference": u_pac},
+                   "subject": {"reference": ref_pac},
                    "effectiveDateTime": o["fecha_hora"].isoformat() if o.get("fecha_hora") else _ahora()}
         if o.get("valor_numerico") is not None:
             unidad = o.get("unidad_ucum") or "1"
@@ -568,10 +632,9 @@ def construir_bundle(db, r: dict, reporte: dict | None, obs: list[dict]) -> dict
             recurso["valueString"] = o["valor_texto"]
         else:
             continue
-        entradas.append({"fullUrl": u, "resource": recurso, "request": {"method": "POST", "url": "Observation"}})
-        soporte.append({"reference": u})
+        entradas.append(entrada(recurso))
+        soporte.append({"reference": f"Observation/{recurso['id']}"})
     if reporte:
-        u = f"urn:uuid:{uuid.uuid4()}"
         res = reporte.get("resultado") or {}
         prob = reporte.get("probabilidad")
         conclusion = (f"Modelo {reporte.get('modelo_version') or ''}: "
@@ -579,32 +642,48 @@ def construir_bundle(db, r: dict, reporte: dict | None, obs: list[dict]) -> dict
                       + (f", probabilidad {float(prob):.0%}" if prob is not None else "")
                       + (f". Revisión clínica: {reporte['observaciones']}" if reporte.get("observaciones") else "")
                       + ". Reporte revisado y APROBADO por un clínico.")
-        entradas.append({"fullUrl": u, "request": {"method": "POST", "url": "DiagnosticReport"}, "resource": {
-            "resourceType": "DiagnosticReport", "identifier": [{"system": SYS_REMISION_EXT + "/reporte-ia", "value": str(reporte["id"])}],
-            "status": "final",
-            "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "OTH",
-                                      "display": "Other"}], "text": "Apoyo diagnóstico con IA"}],
-            "code": {"coding": [{"system": fhir_svc.SYS_LOINC, "code": "11526-1", "display": "Pathology study"}],
-                     "text": "Reporte de IA aprobado"},
-            "subject": {"reference": u_pac},
-            "issued": (reporte.get("revisado_at") or datetime.now(timezone.utc)).isoformat(),
-            "conclusion": conclusion}})
-        soporte.append({"reference": u})
+        dr = {"resourceType": "DiagnosticReport", "id": f"rep-{reporte['id']}",
+              "identifier": [{"system": SYS_REMISION_EXT + "/reporte-ia", "value": str(reporte["id"])}],
+              "status": "final",
+              "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "OTH",
+                                        "display": "Other"}], "text": "Apoyo diagnóstico con IA"}],
+              "code": {"coding": [{"system": fhir_svc.SYS_LOINC, "code": "11526-1", "display": "Pathology study"}],
+                       "text": "Reporte de IA aprobado"},
+              "subject": {"reference": ref_pac},
+              "issued": (reporte.get("revisado_at") or datetime.now(timezone.utc)).isoformat(),
+              "conclusion": conclusion}
+        entradas.append(entrada(dr))
+        soporte.append({"reference": f"DiagnosticReport/{dr['id']}"})
     esp = None
     if r.get("especialidad_id"):
         esp = db.execute(text("SELECT nombre, codigo_snomed FROM especialidades WHERE id = :i"), {"i": r["especialidad_id"]}).first()
-    sr = {"resourceType": "ServiceRequest",
-          "identifier": [{"system": SYS_REMISION_EXT, "value": str(r["id"])}],
+    sr = {"resourceType": "ServiceRequest", "id": f"rem-{n}",
+          "identifier": [{"system": SYS_REMISION_EXT, "value": str(n)}],
           "status": "active", "intent": "order", "priority": PRIORIDAD_A_FHIR.get(r["prioridad"], "routine"),
           "code": {"coding": [SNOMED_REMISION], "text": "Remisión a especialista"},
-          "subject": {"reference": u_pac}, "authoredOn": _ahora(),
+          "subject": {"reference": ref_pac}, "authoredOn": _ahora(),
           "requester": {"display": INSTITUCION},
           "reasonCode": [{"text": r["motivo"]}],
           "supportingInfo": soporte}
     if esp:
         sr["performerType"] = {"coding": ([{"system": fhir_svc.SYS_SNOMED, "code": esp[1], "display": esp[0]}] if esp[1] else []),
                                "text": esp[0]}
-    entradas.insert(1, {"fullUrl": f"urn:uuid:{uuid.uuid4()}", "resource": sr, "request": {"method": "POST", "url": "ServiceRequest"}})
+    entradas.insert(1, entrada(sr))
+    if consentimiento:
+        desde = consentimiento["otorgado_at"].isoformat() if consentimiento.get("otorgado_at") else _ahora()
+        entradas.append(entrada({
+            "resourceType": "Consent", "id": f"con-{consentimiento['id']}", "status": "active",
+            "scope": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/consentscope", "code": "patient-privacy"}]},
+            "category": [{"coding": [{"system": fhir_svc.SYS_LOINC, "code": "59284-0", "display": "Patient Consent"}]}],
+            "patient": {"reference": ref_pac}, "dateTime": desde,
+            "policyRule": {"text": "Ley 1581 de 2012: autorización para transferir datos a la institución destino"},
+            "provision": {"type": "permit", "period": {"start": desde},
+                          "purpose": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActReason", "code": "TREAT"}]}}))
+    entradas.append(entrada({
+        "resourceType": "Task", "id": f"rem-{n}", "identifier": [{"system": SYS_REMISION_EXT, "value": str(n)}],
+        "status": "requested", "intent": "order", "priority": PRIORIDAD_A_FHIR.get(r["prioridad"], "routine"),
+        "code": {"coding": [SNOMED_REMISION]}, "focus": {"reference": ref_sr}, "basedOn": [{"reference": ref_sr}],
+        "for": {"reference": ref_pac}, "authoredOn": _ahora(), "requester": {"display": INSTITUCION}}))
     return {"resourceType": "Bundle", "type": "transaction", "timestamp": _ahora(), "entry": entradas}
 
 
@@ -618,7 +697,7 @@ def enviar(db, remision_id: int) -> dict:
         reporte = db.execute(text("SELECT * FROM reportes_ia WHERE id = :i"), {"i": extra["reporte_id"]}).mappings().first()
         reporte = dict(reporte) if reporte else None
     obs = _observaciones_relevantes(db, r["paciente_id"], extra.get("observaciones_ids"))
-    bundle = construir_bundle(db, r, reporte, obs)
+    bundle = construir_bundle(db, r, reporte, obs, consentimiento_vigente(db, r["paciente_id"], r["socio_id"]))
     try:
         resp = _post_socio(socio, socio["ruta_bundle"], bundle)
         ok = resp.status_code < 300
@@ -630,7 +709,8 @@ def enviar(db, remision_id: int) -> dict:
         if not ok:
             detalle += ": " + "; ".join(str(i.get("diagnostics") or i.get("details") or "") for i in cuerpo.get("issue") or [])[:600] \
                 if isinstance(cuerpo, dict) and cuerpo.get("issue") else f": {json.dumps(cuerpo, ensure_ascii=False)[:600]}"
-        id_socio = (cuerpo.get("id") if isinstance(cuerpo, dict) else None) or resp.headers.get("location")
+        id_socio = (resp.headers.get("x-remision-externa") or (cuerpo.get("id") if isinstance(cuerpo, dict) else None)
+                    or resp.headers.get("location"))
     except (httpx.HTTPError, ErrorEnvio) as e:
         ok, detalle, id_socio = False, f"No se pudo contactar al socio: {e}"[:700], None
     db.execute(text("""UPDATE remisiones SET estado_envio = :e, detalle_envio = :d, id_externo = COALESCE(:x, id_externo),
@@ -654,7 +734,15 @@ def responder_socio(remision_id: int) -> None:
         if not socio:
             return
         tarea = task_de(db, dict(r))
-        tarea["basedOn"] = [{"identifier": {"system": SYS_REMISION_EXT, "value": r["id_externo"]}, "type": "ServiceRequest"}]
+        extra = r["datos_externos"] or {}
+        sr_ref = {"reference": f"ServiceRequest/{extra['sr_id']}"} if extra.get("sr_id") else {}
+        tarea["basedOn"] = [{**sr_ref, "identifier": {"value": r["id_externo"]}, "type": "ServiceRequest"}]
+        tarea["focus"] = {**sr_ref, "identifier": {"value": r["id_externo"]}, "type": "ServiceRequest"}
+        if extra.get("patient_id"):
+            tarea["for"] = {"reference": f"Patient/{extra['patient_id']}"}
+        if extra.get("task_id"):
+            tarea["id"] = extra["task_id"]           # el socio reconoce su propio Task
+        tarea["identifier"] = [{"system": SYS_REMISION_EXT, "value": str(r["id"])}]
         try:
             resp = _post_socio(socio, socio["ruta_task"], tarea)
             ok, detalle = resp.status_code < 300, f"Respuesta al socio: HTTP {resp.status_code}"
