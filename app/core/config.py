@@ -86,6 +86,26 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.8-flash"   # GEMINI_MODEL: preguntas extensas o que piden razonar
     gemini_model_lite: str = "gemini-3.5-flash-lite"   # GEMINI_MODEL_LITE: preguntas cortas y puntuales
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    # GEMINI_MODELOS_RESPALDO: si los dos de arriba llegan al límite de la capa gratuita (429),
+    # se prueban estos, en orden. Cada modelo tiene su propia cuota en AI Studio.
+    gemini_modelos_respaldo: str = "gemini-3.1-flash-lite,gemini-2.5-flash-lite,gemini-3.6-flash"
+    # Interoperabilidad (Semana 14, docs/INTEROP.md). El secreto federado se comparte SOLO con los
+    # sistemas pares (por un canal privado): de él sale el identificador federado del paciente.
+    interop_secreto_federado: str = ""     # INTEROP_SECRETO_FEDERADO
+    interop_token_minutos: int = 10        # INTEROP_TOKEN_MINUTOS: vida del access token OAuth2
+    interop_ventana_segundos: int = 300    # INTEROP_VENTANA_SEGUNDOS: desfase máximo de X-Timestamp (y vida del nonce)
+    interop_audiencia: str = "pulso-interop"
+    interop_emisor: str = "pulso"
+    # Agente (Semana 13, docs/AGENTE.md). Solo modelos lite: un turno del agente gasta de 2 a 4
+    # llamadas y el plan gratuito da 15 por minuto y 500 al día por modelo. Se prueban en orden.
+    agente_activo: bool = True                     # AGENTE_ACTIVO: false = Lati vuelve al RAG solo
+    agente_modelos: str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite"   # AGENTE_MODELOS
+    agente_max_simultaneas: int = 2                # AGENTE_MAX_SIMULTANEAS: llamadas al proveedor a la vez
+    agente_max_en_cola: int = 6                    # AGENTE_MAX_EN_COLA: turnos esperando; más = "Lati está ocupada"
+    agente_timeout_s: float = 60.0                 # AGENTE_TIMEOUT_S: tiempo máximo de un turno completo
+    agente_timeout_modelo_s: float = 25.0          # AGENTE_TIMEOUT_MODELO_S: tiempo máximo de una llamada al modelo
+    agente_max_llamadas: int = 6                   # AGENTE_MAX_LLAMADAS: llamadas al modelo por turno
+    agente_memoria: str = "postgres"               # AGENTE_MEMORIA: postgres (DATABASE_URL) o memoria (se pierde al reiniciar)
     xai_api_key: str = ""                 # XAI_API_KEY
     xai_model: str = "grok-4.3"           # XAI_MODEL (confirmar en console.x.ai)
     xai_base_url: str = "https://api.x.ai/v1"
