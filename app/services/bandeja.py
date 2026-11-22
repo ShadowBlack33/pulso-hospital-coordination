@@ -116,6 +116,12 @@ def usuarios_con_rol(db: Session, rol: str, excepto: int | None = None) -> list[
 @event.listens_for(Session, "after_commit")
 def _al_confirmar(sesion: Session) -> None:
     """La transacción quedó guardada: ahora sí se publica y se corren los pendientes."""
+    # SQLAlchemy 2.1 también emite after_commit al liberar un SAVEPOINT (begin_nested, como en
+    # los reactores). Ahí la transacción real sigue abierta: correr los pendientes publicaría
+    # eventos de algo aún sin guardar y, si la tarea abre otra sesión que audita, se bloquea
+    # esperando el candado de la cadena de auditoría que tiene esta misma transacción.
+    if sesion.in_nested_transaction():
+        return
     pendientes = sesion.info.pop("eventos_pendientes", [])
     callbacks = sesion.info.pop("tras_commit", [])
     for uid, ev in pendientes:
