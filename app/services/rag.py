@@ -23,7 +23,10 @@ import hashlib
 import hmac
 import logging
 import re
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -76,6 +79,88 @@ def _proveedor(extensa: bool = True) -> tuple[str, str, str, str] | None:
     if c.xai_api_key:
         return "xai", c.xai_base_url, c.xai_api_key, c.xai_model
     return None
+
+
+# Modelos que respondieron 429, y hasta cuándo no se vuelven a intentar (time.monotonic()).
+# Así una pregunta no gasta 3 o 4 llamadas fallidas antes de llegar al modelo que sí tiene cuota.
+_AGOTADOS: dict[str, float] = {}
+
+
+class SinModeloDisponible(Exception):
+    """Hay proveedor configurado, pero todos los modelos fallaron o están sin cuota."""
+
+
+def _cadena(extensa: bool = True) -> list[tuple[str, str, str, str]]:
+    """
+    Modelos a intentar, en orden: el que corresponde (completo o lite), el otro y los de
+    GEMINI_MODELOS_RESPALDO. Se saltan los que están en pausa por límite de cuota.
+    """
+    c = get_settings()
+    if not c.gemini_api_key:
+        prov = _proveedor(extensa)
+        return [prov] if prov else []
+    principal = c.gemini_model if extensa or not c.gemini_model_lite else c.gemini_model_lite
+    otro = c.gemini_model_lite if principal == c.gemini_model else c.gemini_model
+    respaldo = [m.strip() for m in str(c.gemini_modelos_respaldo).split(",") if m.strip()]
+    ahora, vistos, salida = time.monotonic(), set(), []
+    for m in [principal, otro, *respaldo]:
+        if m and m not in vistos and _AGOTADOS.get(m, 0) <= ahora:
+            vistos.add(m)
+            salida.append(("gemini", c.gemini_base_url, c.gemini_api_key, m))
+    if c.xai_api_key:
+        salida.append(("xai", c.xai_base_url, c.xai_api_key, c.xai_model))
+    return salida
+
+
+def _segundos_hasta_reinicio_diario() -> float:
+    """La cuota diaria de AI Studio se reinicia a medianoche de la hora del Pacífico."""
+    ahora = datetime.now(ZoneInfo("America/Los_Angeles"))
+    manana = (ahora + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+    return (manana - ahora).total_seconds()
+
+
+def marcar_agotado(modelo: str, detalle: str) -> None:
+    """
+    Pone un modelo en pausa tras un 429. La usan el RAG y el agente (app/agente/harness.py),
+    así los dos saben qué modelos están sin cuota y ninguno gasta llamadas en ellos.
+    """
+    diaria = "PerDay" in detalle or "per day" in detalle.lower()
+    espera = _segundos_hasta_reinicio_diario() if diaria else 60.0
+    _AGOTADOS[modelo] = time.monotonic() + espera
+    log.warning("Modelo %s sin cuota (%s); en pausa %.0f min", modelo, "diaria" if diaria else "por minuto",
+                espera / 60)
+
+
+def disponible(modelo: str) -> bool:
+    return _AGOTADOS.get(modelo, 0) <= time.monotonic()
+
+
+def _pausar_si_cuota(modelo: str, error: Exception) -> None:
+    respuesta = getattr(error, "response", None)
+    if respuesta is None or respuesta.status_code != 429:
+        return
+    marcar_agotado(modelo, respuesta.text or "")
+
+
+def _completar(cuerpo: dict, extensa: bool, timeout: float = 30) -> tuple[str, str]:
+    """
+    Llama al primer modelo de la cadena que responda. Devuelve (texto, "proveedor:modelo").
+    Lanza SinModeloDisponible si ninguno responde.
+    """
+    import httpx  # noqa: PLC0415
+    cadena = _cadena(extensa)
+    if not cadena:
+        raise SinModeloDisponible("sin modelos disponibles (todos en pausa por cuota)")
+    for nombre, base, clave, modelo in cadena:
+        try:
+            r = httpx.post(f"{base.rstrip('/')}/chat/completions", timeout=timeout,
+                           headers={"Authorization": f"Bearer {clave}"}, json={**cuerpo, "model": modelo})
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip(), f"{nombre}:{modelo}"
+        except Exception as e:  # noqa: BLE001 -- cuota, red o error del proveedor: probar el siguiente
+            _pausar_si_cuota(modelo, e)
+            log.warning("El modelo %s no respondió: %s", modelo, str(e)[:200])
+    raise SinModeloDisponible("ningún modelo respondió")
 NO_ENCONTRADO = "NO_ENCONTRADO"
 
 
@@ -110,6 +195,18 @@ def _identificadores(p: Paciente) -> list[str]:
             claro = descifrar(v, aad) or ""
             valores.append(claro)
             valores += [x for x in claro.split() if len(x) >= 3]   # cada nombre por separado
+    # Proyecto final (R12 ampliado al agente): correo, teléfono y dirección tampoco llegan al LLM.
+    # Van completos (no palabra por palabra: "Calle" o "Norte" pueden aparecer en un texto clínico).
+    for col, aad in (("email_cifrado", "pacientes.email"), ("telefono_cifrado", "pacientes.telefono"),
+                     ("direccion_cifrada", "pacientes.direccion")):
+        v = getattr(p, col, None)
+        if v:
+            claro = (descifrar(v, aad) or "").strip()
+            if len(claro) >= 5:
+                valores.append(claro)
+                digitos = "".join(ch for ch in claro if ch.isdigit())
+                if col == "telefono_cifrado" and len(digitos) >= 7:
+                    valores += [digitos, digitos[-10:]]
     return sorted({v for v in valores if v}, key=len, reverse=True)
 
 
@@ -575,6 +672,40 @@ def _turnos(historial: list[dict] | None) -> list[dict]:
     return salida
 
 
+# Lati se presenta una sola vez. Con historial, el prompt lo prohíbe y, si el modelo igual
+# arranca con "Hola, soy Lati..." o repite que no es profesional de la salud, se recorta aquí.
+YA_CONVERSANDO = (
+    "Ya están conversando: NO saludes, NO te presentes ni digas quién eres, y NO repitas que eres una IA o "
+    "que no eres profesional de la salud. Ve directo a la respuesta, como en una conversación que sigue."
+)
+_SALUDO = re.compile(
+    r"^\s*(¡?\s*(hola|buen[oa]s?( d[ií]as| tardes| noches)?|qu[eé] tal)\b[^.!?\n]*[.!?,]?\s*)?"
+    r"(soy lati\b[^.!?\n]*[.!?]\s*)?", re.IGNORECASE)
+_NO_SOY = re.compile(r"\s*(recuerda que |ten en cuenta que )?no soy (una )?(persona|personal|profesional)"
+                     r"[^.!?\n]*[.!?]", re.IGNORECASE)
+
+
+def sin_saludo(texto: str, historial: list[dict] | None) -> str:
+    """Quita el saludo y la presentación repetidos cuando la conversación ya empezó."""
+    if not historial or not texto:
+        return texto
+    limpio = _NO_SOY.sub("", _SALUDO.sub("", texto, count=1)).strip()
+    if not limpio:
+        return texto
+    return limpio[0].upper() + limpio[1:]
+
+
+def _sistema(base: str, rol: str | None, historial: list[dict] | None, numerada: bool) -> str:
+    extra = []
+    if rol in POR_PERFIL:
+        extra.append(POR_PERFIL[rol])
+    if historial:
+        extra.append(YA_CONVERSANDO)
+    if numerada:
+        return base + "".join(f"\n{10 + i}. {e}" for i, e in enumerate(extra))
+    return base + "".join(f"\n{e}" for e in extra)
+
+
 def consulta_con_contexto(pregunta: str, historial: list[dict] | None) -> str:
     """
     Lo que se busca en el índice. Una pregunta corta de seguimiento ("¿y en niños?") no
@@ -593,23 +724,18 @@ def _llm(pregunta: str, frags: list[dict], rol: str | None = None,
     y Grok exponen la misma API de chat compatible con OpenAI, así que la
     llamada es una sola. Devuelve (texto, "proveedor:modelo") o None si no hay clave.
     """
-    prov = _proveedor(es_extensa(pregunta) if extensa is None else extensa)
-    if prov is None:
+    extensa = es_extensa(pregunta) if extensa is None else extensa
+    if _proveedor(extensa) is None:
         return None
-    nombre, base, clave, modelo = prov
-    import httpx  # noqa: PLC0415
-    cuerpo = {"model": modelo, "max_tokens": MAX_TOKENS,
-              "messages": [{"role": "system", "content": SISTEMA + (
-                                "\n10. " + POR_PERFIL[rol] if rol in POR_PERFIL else "")},
+    cuerpo = {"max_tokens": MAX_TOKENS,
+              "messages": [{"role": "system", "content": _sistema(SISTEMA, rol, historial, numerada=True)},
                            *_turnos(historial),
                            {"role": "user", "content": f"{_contexto(frags)}\n\nPregunta: {pregunta}"}]}
     t = temperatura()
     if t is not None:
         cuerpo["temperature"] = t
-    r = httpx.post(f"{base.rstrip('/')}/chat/completions", timeout=30,
-                   headers={"Authorization": f"Bearer {clave}"}, json=cuerpo)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip(), f"{nombre}:{modelo}"
+    texto, generador = _completar(cuerpo, extensa)
+    return sin_saludo(texto, historial), generador
 
 
 def citas_en(texto: str, n_fuentes: int) -> list[int]:
@@ -624,6 +750,8 @@ def citas_en(texto: str, n_fuentes: int) -> list[int]:
 
 
 SIN_EVIDENCIA = "No encuentro información suficiente en las fuentes autorizadas para responder."
+OCUPADO = ("En este momento no puedo redactar la respuesta: el modelo de lenguaje alcanzó su límite de uso. "
+           "Intenta de nuevo en un minuto.")
 
 
 def conversar(pregunta: str, historial: list[dict] | None = None, rol: str | None = None,
@@ -633,28 +761,23 @@ def conversar(pregunta: str, historial: list[dict] | None = None, rol: str | Non
     mis documentos, pero sí tengo...". No lleva citas ni contenido clínico propio del modelo.
     Usa el modelo lite (es corta). None si no hay modelo o falla.
     """
-    prov = _proveedor(False)
-    if prov is None:
+    if _proveedor(False) is None:
         return None
-    nombre, base, clave, modelo = prov
-    import httpx  # noqa: PLC0415
     lista = "\n".join(f"- {f}" for f in (fuentes or [])) or "- (este perfil no tiene documentos en el asistente)"
-    cuerpo = {"model": modelo, "max_tokens": 600,
-              "messages": [{"role": "system", "content": CONVERSACION + lista + (
-                                "\n" + POR_PERFIL[rol] if rol in POR_PERFIL else "")},
+    cuerpo = {"max_tokens": 600,
+              "messages": [{"role": "system", "content": _sistema(CONVERSACION + lista, rol, historial,
+                                                                    numerada=False)},
                            *_turnos(historial), {"role": "user", "content": pregunta}]}
     t = temperatura()
     if t is not None:
         cuerpo["temperature"] = t
     try:
-        r = httpx.post(f"{base.rstrip('/')}/chat/completions", timeout=30,
-                       headers={"Authorization": f"Bearer {clave}"}, json=cuerpo)
-        r.raise_for_status()
-        texto = _MARCA.sub("", r.json()["choices"][0]["message"]["content"]).strip()
-    except Exception:  # noqa: BLE001
-        log.warning("El modelo (conversación) no respondió", exc_info=True)
+        crudo, generador = _completar(cuerpo, extensa=False)
+    except SinModeloDisponible:
+        log.warning("Ningún modelo respondió en la conversación")
         return None
-    return (texto, f"{nombre}:{modelo}") if texto and NO_ENCONTRADO not in texto else None
+    texto = sin_saludo(_MARCA.sub("", crudo).strip(), historial)
+    return (texto, generador) if texto and NO_ENCONTRADO not in texto else None
 
 
 def _sin_evidencia(pregunta: str, historial, rol, fuentes, conversacional: bool, generador: str) -> dict:
@@ -684,17 +807,18 @@ def responder(pregunta: str, frags: list[dict], rol: str | None = None, estricto
     # Los dos modelos reciben los mismos 8 fragmentos: en la prueba de abstención el pasaje
     # que respondía quedó a veces en el puesto 7 (P11), fuera de los 4 primeros.
     extensa = es_extensa(pregunta) if forzar_extensa is None else forzar_extensa   # forzar: solo para diagnóstico
-    # Primero el modelo que corresponde; si falla (límite de la capa gratuita, red),
-    # el otro; si también falla, la respuesta extractiva.
-    for intento in (extensa, not extensa):
-        try:
-            hecho = _llm(pregunta, frags, rol, intento, historial)
-        except Exception:  # noqa: BLE001 -- sin red, sin saldo o error del proveedor: no se cae la consulta
-            log.warning("El modelo (%s) no respondió", "completo" if intento else "lite", exc_info=True)
-            continue
-        if hecho:
-            texto, generador = hecho
-        break
+    # _completar recorre la cadena: el modelo que corresponde, el otro y los de respaldo,
+    # saltando los que están sin cuota. Si hay proveedor pero ninguno responde, se avisa en
+    # vez de pegar una frase extractiva que puede no tener relación con la pregunta.
+    try:
+        hecho = _llm(pregunta, frags, rol, extensa, historial)
+    except SinModeloDisponible:
+        return {"respuesta": OCUPADO, "abstencion": True, "citas_usadas": [], "generador": "ninguno"}
+    except Exception:  # noqa: BLE001 -- respuesta inesperada del proveedor: no se cae la consulta
+        log.warning("El modelo no respondió", exc_info=True)
+        return {"respuesta": OCUPADO, "abstencion": True, "citas_usadas": [], "generador": "ninguno"}
+    if hecho:
+        texto, generador = hecho
     if not texto:
         if not estricto:
             return {"respuesta": SIN_EVIDENCIA, "abstencion": True, "citas_usadas": [], "generador": "ninguno"}

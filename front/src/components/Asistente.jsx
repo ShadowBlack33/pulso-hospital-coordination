@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
-
-
 import { ArrowUp, BookOpen, Check, ChevronDown, Maximize2, Minimize2, RotateCcw, Sparkles, X } from "lucide-react";
-
 import * as S from "../lib/servicios";
 import { useUsuario } from "../lib/hooks";
 import Markdown from "./Markdown";
@@ -24,8 +21,6 @@ const EJEMPLOS = {
   coordinador: ["¿Qué puedes hacer?", "¿Hay alertas sin atender?", "¿Cuántas camas libres hay?",
                 "¿Qué pasa si nadie reconoce una alerta crítica en 5 minutos?"],
 };
-
-
 const EJEMPLOS_CLINICOS = ["¿Cómo va mi turno?", "¿Cómo van los quirófanos hoy?",
                            "¿Desde qué cifra de potasio la hiperpotasemia es grave?",
                            "¿Con qué hemoglobina se transfunde a un paciente estable?"];
@@ -96,6 +91,61 @@ function Fuentes({ citas, abierta, onToggle }) {
   );
 }
 
+const PRIORIDAD = { urgente: "Urgente", prioritaria: "Prioritaria", rutinaria: "Rutinaria" };
+const SOLICITUD = { valoracion: "Valoración", diagnostico: "Apoyo diagnóstico", tratamiento: "Manejo o tratamiento",
+                    procedimiento: "Procedimiento o cirugía", seguimiento: "Seguimiento" };
+
+/** Lo que el agente quiere hacer: no pasa nada hasta que el clínico lo aprueba (semana 13, Parte 11). */
+function TarjetaAccion({ accion, decision, decidiendo, onDecidir }) {
+  const [rechazando, setRechazando] = useState(false);
+  const [motivo, setMotivo] = useState("");
+  if (!accion) return null;
+  const a = accion.args || {};
+  const esRemision = accion.herramienta === "proponer_remision";
+  return (
+    <div className="anim-pop mt-2 rounded-2xl border border-cloud-card bg-paper-white p-4 text-xs shadow-sm">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-strong">
+        Acción propuesta{decision ? "" : " · necesita tu aprobación"}
+      </p>
+      <p className="mt-1 text-sm font-semibold">{esRemision ? `Remitir a ${a.especialidad}` : accion.herramienta}</p>
+      {esRemision && (
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+          <dt className="text-gray-strong">Prioridad</dt><dd>{PRIORIDAD[a.prioridad] || a.prioridad}</dd>
+          <dt className="text-gray-strong">Solicitud</dt><dd>{SOLICITUD[a.tipo_solicitud] || a.tipo_solicitud}</dd>
+          <dt className="text-gray-strong">Motivo</dt><dd className="whitespace-pre-wrap">{a.motivo}</dd>
+        </dl>
+      )}
+      {decision ? (
+        <p className={`mt-3 flex items-center gap-1.5 font-semibold ${decision === "approve" ? "text-metric-blue" : "text-gray-strong"}`}>
+          {decision === "approve" ? <Check size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}
+          {decision === "approve" ? "Aprobada" : "Rechazada"}
+        </p>
+      ) : rechazando ? (
+        <form className="mt-3 space-y-2" onSubmit={(e) => { e.preventDefault(); onDecidir("reject", motivo.trim()); }}>
+          <label className="sr-only" htmlFor="motivo-rechazo">Motivo del rechazo</label>
+          <input id="motivo-rechazo" autoFocus maxLength={300} value={motivo} onChange={(e) => setMotivo(e.target.value)}
+                 placeholder="¿Por qué la rechazas? (Lati lo tendrá en cuenta)"
+                 className="w-full rounded-xl bg-cloud-card px-3 py-2 outline-none focus:ring-2 focus:ring-metric-blue/40" />
+          <div className="flex gap-2">
+            <button type="submit" disabled={!!decidiendo}
+                    className="rounded-full bg-charcoal px-4 py-1.5 font-semibold text-white disabled:opacity-40">Rechazar</button>
+            <button type="button" onClick={() => setRechazando(false)} className="rounded-full px-3 py-1.5 font-medium text-gray-strong hover:text-ink">Cancelar</button>
+          </div>
+        </form>
+      ) : (
+        <div className="mt-3 flex gap-2">
+          <button type="button" onClick={() => onDecidir("approve")} disabled={!!decidiendo}
+                  className="flex items-center gap-1.5 rounded-full bg-charcoal px-4 py-1.5 font-semibold text-white transition hover:bg-ink disabled:opacity-40">
+            <Check size={14} aria-hidden="true" /> {decidiendo === "approve" ? "Aprobando…" : "Aprobar"}
+          </button>
+          <button type="button" onClick={() => setRechazando(true)} disabled={!!decidiendo}
+                  className="rounded-full border border-cloud-card px-4 py-1.5 font-semibold transition hover:border-ink disabled:opacity-40">Rechazar</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Escribiendo() {
   return (
     <div className="flex items-center gap-1 px-1 py-2" role="status" aria-label="Lati está escribiendo">
@@ -122,6 +172,8 @@ export default function Asistente() {
   const [soloPaciente, setSoloPaciente] = useState(true);
   const [fuentes, setFuentes] = useState(null);
   const [desplegadas, setDesplegadas] = useState({});
+  const [agente, setAgente] = useState(null);           // {puede_usar}: médico, especialista, admin... usan el agente
+  const [conversacionId, setConversacionId] = useState(nuevoId);
   const fin = useRef(null);
   const entrada = useRef(null);
 
@@ -129,6 +181,9 @@ export default function Asistente() {
   useEffect(() => {
     if (abierto && fuentes === null) S.fuentesAsistente().then((r) => setFuentes(r.fuentes || [])).catch(() => setFuentes([]));
   }, [abierto, fuentes]);
+  useEffect(() => {
+    if (abierto && agente === null) S.estadoAgente().then(setAgente).catch(() => setAgente({ puede_usar: false }));
+  }, [abierto, agente]);
 
   const enFicha = pathname.match(/^\/app\/pacientes\/([^/]+)/);
   const pacienteId = enFicha && usuario?.rol !== "paciente" ? decodeURIComponent(enFicha[1]) : null;
@@ -153,11 +208,21 @@ export default function Asistente() {
     const historial = conversacion.filter((m) => !m.error).slice(-TURNOS_HISTORIAL)
       .map((m) => ({ rol: m.quien === "yo" ? "usuario" : "asistente",
                      texto: m.generador === "sistema" ? "(Respondí con datos en vivo de Pulso.)" : m.texto.slice(0, 4000) }));
+    const paciente = pacienteId && soloPaciente ? pacienteId : null;
     setPregunta("");
     setEnviando(true);
     setConversacion((c) => [...c, { quien: "yo", texto: q }]);
     try {
-      const r = await S.preguntarAsistente(q, pacienteId && soloPaciente ? pacienteId : null, historial);
+      if (agente?.puede_usar) {
+        try {
+          agregarRespuestaAgente(await S.chatAgente(q, conversacionId, paciente), paciente);
+          return;
+        } catch (err) {
+          if (err.status !== 503) throw err;
+          setAgente({ puede_usar: false });   // el agente no está disponible: sigue el asistente de consulta (RAG)
+        }
+      }
+      const r = await S.preguntarAsistente(q, paciente, historial);
       setConversacion((c) => [...c, { quien: "asistente", texto: r.respuesta, citas: r.citas || [], abstencion: r.abstencion,
                                       fuentes: r.fuentes_disponibles || [], generador: r.generador }]);
     } catch (err) {
@@ -168,11 +233,48 @@ export default function Asistente() {
     }
   };
 
-  const nueva = () => { setConversacion([]); setDesplegadas({}); setPregunta(""); entrada.current?.focus(); };
+  // Respuesta del agente: texto con citas, o una acción que espera la decisión del clínico.
+  const agregarRespuestaAgente = (r, paciente) => {
+    const base = { quien: "asistente", herramientas: r.herramientas || [], generador: r.generador };
+    if (r.estado === "pendiente_aprobacion") {
+      setConversacion((c) => [...c, { ...base, paciente, accion: r.acciones?.[0],
+        texto: r.respuesta || "Te propongo esta acción. No se hace nada hasta que la apruebes." }]);
+    } else {
+      setConversacion((c) => [...c, { ...base, texto: r.respuesta || "No pude responder.", citas: r.citas || [],
+                                      aviso: r.estado !== "respondido" }]);
+    }
+  };
+
+  const decidir = async (i, decision, motivo) => {
+    const m = conversacion[i];
+    const marcar = (cambios) => setConversacion((c) => c.map((x, j) => (j === i ? { ...x, ...cambios } : x)));
+    marcar({ decidiendo: decision });
+    setEnviando(true);
+    try {
+      const r = await S.decidirAgente(conversacionId, m.paciente, decision, motivo);
+      marcar({ decidiendo: null, decision });
+      if (r.estado === "sin_pendientes") {
+        setConversacion((c) => [...c, { quien: "asistente", texto: "Esa acción ya no estaba pendiente.", aviso: true }]);
+      } else {
+        agregarRespuestaAgente(r, m.paciente);
+      }
+    } catch (err) {
+      marcar({ decidiendo: null });
+      setConversacion((c) => [...c, { quien: "asistente", texto: err.message || "No pude registrar tu decisión.", error: true }]);
+    } finally {
+      setEnviando(false);
+    }
+  };
+
+  const nueva = () => {
+    setConversacion([]); setDesplegadas({}); setPregunta(""); setConversacionId(nuevoId()); entrada.current?.focus();
+  };
   const alternar = (i) => setDesplegadas((d) => ({ ...d, [i]: !d[i] }));
 
   if (!usuario) return null;
-  const ejemplos = EJEMPLOS[usuario.rol] || (fuentes?.length ? EJEMPLOS_CLINICOS : ["¿Qué puedes hacer?"]);
+  const ejemplos = EJEMPLOS[usuario.rol]
+    || (agente?.puede_usar && pacienteId && soloPaciente ? EJEMPLOS_FICHA : null)
+    || (fuentes?.length ? EJEMPLOS_CLINICOS : ["¿Qué puedes hacer?"]);
   const tamano = grande
     ? "w-[min(760px,calc(100vw-2rem))] h-[min(860px,calc(100vh-8rem))]"
     : "w-[min(480px,calc(100vw-2rem))] h-[min(680px,calc(100vh-8rem))]";
@@ -241,7 +343,8 @@ export default function Asistente() {
               </div>
             ) : (
               <div key={i} className="anim-pop max-w-[95%]">
-                <div className={m.error ? "rounded-2xl bg-coral-soft px-4 py-2.5 text-coral-ink" : ""}>
+                <div className={m.error ? "rounded-2xl bg-coral-soft px-4 py-2.5 text-coral-ink"
+                                : m.aviso ? "rounded-2xl bg-cloud-card px-4 py-2.5 text-gray-strong" : ""}>
                   {(() => {
                     // [F3] → numerito según el orden en que aparecen las citas de esta respuesta.
                     const orden = Object.fromEntries((m.citas || []).map((c, j) => [c.id, j + 1]));
@@ -255,7 +358,12 @@ export default function Asistente() {
                     <ul className="mt-1 list-disc space-y-0.5 pl-4">{m.fuentes.map((f) => <li key={f}>{f}</li>)}</ul>
                   </div>
                 )}
+                <TarjetaAccion accion={m.accion} decision={m.decision} decidiendo={m.decidiendo}
+                               onDecidir={(d, motivo) => decidir(i, d, motivo)} />
                 <Fuentes citas={m.citas} abierta={!!desplegadas[i]} onToggle={() => alternar(i)} />
+                {pasos(m.herramientas).length > 0 && (
+                  <p className="mt-1.5 text-[11px] text-gray-strong">Consulté: {pasos(m.herramientas).join(" · ")}</p>
+                )}
                 {origen(m) && !m.citas?.length && <p className="mt-1.5 text-[11px] text-gray-strong">{origen(m)}</p>}
               </div>
             ))}
