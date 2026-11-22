@@ -1,6 +1,6 @@
 # Pulso · Real-time hospital capacity coordination
 
-[![CI](https://github.com/ShadowBlack33/Salud-digital-hsr/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShadowBlack33/Salud-digital-hsr/actions/workflows/ci.yml)
+[![CI](https://github.com/ShadowBlack33/pulso-hospital-coordination/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ShadowBlack33/pulso-hospital-coordination/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-19-149eca)](https://react.dev/)
@@ -185,8 +185,10 @@ sequenceDiagram
   Note over A,B: Both sides audit the exchange with external origin
 ```
 
-The contract any team can implement is in [`docs/INTEROP.md`](docs/INTEROP.md); Pulso publishes it at
+The contract any team can implement is in [`docs/INTEROP.md`](docs/INTEROP.md) (short version for partners: [`docs/CONTRATO_R30.md`](docs/CONTRATO_R30.md)); Pulso publishes it at
 `GET /api/interop/metadata`.
+
+Tested live on 21 November 2026, in both directions, with the partner team's system (*Sistema de apoyo al triaje hospitalario*): their referral reached our specialist in real time and our acceptance reached them as a FHIR `Task`, and ours did the same the other way, with both sides audited. Pulso adapts to a partner's contract instead of requiring its own: pseudonymized patients, `PUT` entries with stable ids, `Consent` and `Task` in the Bundle, `x-nonce` anti-replay and scope aliases such as `bundle:write`.
 
 ### Automatic flows
 
@@ -234,8 +236,8 @@ The demo password is in the team's `.env` and in `tester.yaml`. The interface is
 ## Quick start
 
 ```bash
-git clone https://github.com/ShadowBlack33/Salud-digital-hsr.git
-cd Salud-digital-hsr
+git clone https://github.com/ShadowBlack33/pulso-hospital-coordination.git
+cd pulso-hospital-coordination
 cp .env.example .env          # fill in keys and DATABASE_URL
 docker compose up -d --build  # starts all services
 ```
@@ -281,6 +283,7 @@ Stated as the path forward, not presented as working:
 | [`docs/DATASETS.md`](docs/DATASETS.md) | Image and tabular datasets, licenses and clusters |
 | [`docs/NORMATIVA.md`](docs/NORMATIVA.md) | Regulatory map, including requirements R23–R33 |
 | [`docs/STRIDE.md`](docs/STRIDE.md) | STRIDE threat model: data-flow diagram, trust boundaries, threats and controls |
+| [`docs/CONTRATO_R30.md`](docs/CONTRATO_R30.md) | Partner contract: how another institution refers patients to Pulso and answers ours (FHIR Bundle/Task, credentials, errors) |
 | [`docs/INTEROP.md`](docs/INTEROP.md) | Contract for other institutions: referrals (Bundle/Task), credentials, errors |
 | [`docs/AGENTE.md`](docs/AGENTE.md) | Clinical agent: tools, permissions, payload audit, prompt-injection defense |
 | [`ml/UMBRAL.md`](ml/UMBRAL.md) | Clinical threshold and model metrics |

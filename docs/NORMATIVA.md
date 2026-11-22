@@ -108,7 +108,7 @@ Controles nuevos del proyecto final. Cada uno responde también a una fila de [S
 | R30 · Remisiones FHIR entre instituciones | Res. 866/2021 (interoperabilidad de la historia clínica entre prestadores); Res. 1995/1999 | Bundle con Patient, ServiceRequest (SNOMED), Observation (LOINC/UCUM) y DiagnosticReport aprobado; 422 con `OperationOutcome` sin datos a medias; Task de respuesta | `scripts/test_remisiones_externas.py`; `docs/INTEROP.md` | T3, R2, D4 |
 | R31 · Autenticación entre sistemas | Res. 866/2021 | Credenciales de sistema por institución que solo abren las rutas de entrada | `scripts/test_remisiones_externas.py` §2 | S3, E4 |
 | R32 · Consentimiento y minimización | Ley 1581/2012 art. 9 (autorización), art. 26 (transferencia), art. 4 lit. b (finalidad) | `Consent` por institución destino; sin él, 409; Bundle sin teléfono, correo ni dirección; solo el reporte aprobado | `scripts/test_remisiones_externas.py` §5 | I4 |
-| R33 · Demostración cruzada | Res. 866/2021 | Ida y vuelta entre las URL públicas de los dos equipos, en vivo y auditada | Sustentación; `scripts/test_remisiones_externas.py` §6 (ensayo con Pulso como su propio socio) | R2 |
+| R33 · Demostración cruzada | Res. 866/2021 | Ida y vuelta entre las URL públicas de los dos equipos, en vivo y auditada | Ensayo real con el equipo socio (Sistema de apoyo al triaje hospitalario) el 2026-11-21, ida y vuelta en los dos sentidos (`docs/INTEROP.md` §A8); en vivo en la sustentación; `scripts/test_remisiones_externas.py` §6 y §9 | R2 |
 
 ## 3. Lo que declaramos como limitación
 

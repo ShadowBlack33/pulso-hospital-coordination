@@ -68,6 +68,17 @@ Las credenciales de sistema **solo** abren estas rutas: no sirven en la API clí
 `/remisiones`…), y un token de usuario no sirve aquí (R31). Si la institución acordó firma, además van
 `X-Timestamp`, `X-Nonce` y `X-Signature` (sección 4); la ruta firmada es la de la tabla (sin `/api`).
 
+**Anti-repetición sin firma.** Aunque la institución no firme, si manda `x-nonce` (16 a 128 caracteres de
+`A-Z a-z 0-9 _ -`, uno nuevo por envío) Pulso lo anota: repetido → 409, con formato inválido → 400. El nonce
+se gasta aunque el envío se rechace, así que un reintento lleva uno nuevo.
+
+**Scopes con otros nombres.** `/oauth/token` acepta también los nombres que usan otros equipos:
+`bundle:write` (= `system/ServiceRequest.write`) y `task:write` (= `system/Task.write`). Un nombre desconocido
+no tumba el token (se dan los permisos del cliente); un `system/...` que el cliente no tiene → 400 `invalid_scope`.
+
+La versión corta de este contrato, con la misma estructura que usan los equipos socios, está en
+[`CONTRATO_R30.md`](CONTRATO_R30.md).
+
 ## A3. El Bundle que recibimos
 
 `resourceType: Bundle` y `type` `transaction` o `collection` (también se aceptan `message`, `batch`,
@@ -75,10 +86,17 @@ Las credenciales de sistema **solo** abren estas rutas: no sirven en la API clí
 
 | Recurso | Cuántos | Obligatorio |
 |---|---|---|
-| `Patient` | 1 | `identifier` con el documento de identidad y su tipo (`type.coding.code` CC, TI, CE, PA, RC… o el final del `system`), o el id federado de la Parte B. Si el paciente no existe en Pulso: `name` (given y family), `birthDate`, `gender`. **No envíe** teléfono, correo ni dirección: no se guardan. |
-| `ServiceRequest` | 1 | `identifier` (o `id`) único: con él se evita recibir dos veces la misma remisión; `status: active`; `intent: order`; `code` (SNOMED CT, p. ej. `3457005` *Patient referral*); `subject` al Patient; `reasonCode` (o `note`) con el motivo; `priority` routine \| urgent \| asap \| stat. Opcional: `performerType` con la especialidad en SNOMED (p. ej. `419192003` medicina interna) o en texto; `requester.display` con el nombre de su institución. |
-| `Observation` | 0 a 20 | `code` LOINC; `valueQuantity` con `system: http://unitsofmeasure.org` y `code` UCUM (o `valueString`); `subject` al Patient; `status` final. |
+| `Patient` | 1 | Una de tres: `identifier` con el documento de identidad y su tipo (`type.coding.code` CC, TI, CE, PA, RC… o el final del `system`); el id federado de la Parte B; o **solo un seudónimo** (`id` o cualquier `identifier`), sin nombre ni documento. Con seudónimo, Pulso registra un paciente externo (tipo `EXT`) y no pide más. Si se manda, `birthDate` puede ser `AAAA`, `AAAA-MM` o `AAAA-MM-DD`. **No envíe** teléfono, correo ni dirección: no se guardan. |
+| `ServiceRequest` | 1 | `identifier` (o `id`) único: con él se evita recibir dos veces la misma remisión; `status: active`; `intent: order`; `code` (SNOMED CT, p. ej. `3457005` *Patient referral*); `subject` al Patient; `reasonCode` (o `note`) con el motivo; `priority` routine \| urgent \| asap \| stat. `intent` también puede ser `original-order`, `plan`, `proposal` o `directive`. Opcional: `performerType` con la especialidad en SNOMED (p. ej. `419192003` medicina interna) o en `text` con el nombre de la especialidad tal como la llama Pulso (Cirugía general, Cirugía cardiovascular, Neurocirugía, Ortopedia y traumatología, Urología, Ginecobstetricia, Cirugía plástica, Cirugía vascular, Oftalmología, Otorrinolaringología, Anestesiología, Medicina interna, Medicina general, Medicina de urgencias); sin especialidad va a medicina interna. `requester.display` con el nombre de su institución. |
+| `Observation` | 0 a 20 | `code` LOINC; el valor en `valueQuantity` (con `system: http://unitsofmeasure.org` y `code` UCUM), `valueString`, `valueCodeableConcept` o `component` (p. ej. presión arterial sistólica y diastólica); `subject` al Patient; `status` `final`, `amended`, `corrected` o `preliminary`. |
 | `DiagnosticReport` | 0 o 1 | `status: final` (el reporte de IA **aprobado**; uno `preliminary` se rechaza); `subject` al Patient; `conclusion`. |
+| `Consent` | 0 o 1 | Si viene, `status: active` (otro estado → 422). Se guarda como evidencia del consentimiento del paciente para compartir con Pulso. |
+| `Task` | 0 o 1 | `status: requested`, `focus` al ServiceRequest. **Recomendado:** guardamos su `id` y le respondemos a ese Task. |
+
+Las entradas pueden venir con `request.method` `POST` (url = tipo) o `PUT` (url = `Tipo/id`). Para que la
+respuesta les llegue apuntando a sus propios recursos, envíen ids estables en `PUT ServiceRequest/<id>`,
+`PUT Task/<id>` y `PUT Patient/<id>`. Los recursos del socio se guardan con ids propios de Pulso: no pueden
+sobrescribir nada nuestro.
 
 Ejemplo mínimo:
 
@@ -124,8 +142,18 @@ para una remisión nuestra:
 ```
 
 `status`: `accepted`, `rejected` (con `statusReason.text` como motivo), `completed`, `in-progress` o
-`cancelled`. `basedOn` (o `focus`) lleva el `identifier` del ServiceRequest que **nosotros** enviamos
-(system `https://pulso.hsanrafael.co/fhir/identifier/remision`, value = nuestro número de remisión).
+`cancelled`. Para saber a cuál remisión nuestra responden, basta **una** de estas:
+
+- `basedOn` o `focus` con la referencia `ServiceRequest/rem-<n>` (el id estable que les mandamos), o con el
+  `identifier` (system `https://pulso.hsanrafael.co/fhir/identifier/remision`, value `<n>`);
+- `id` igual al del Task que les mandamos (`rem-<n>`).
+
+La misma respuesta otra vez es un reintento: 200 sin repetir el aviso.
+
+**El Task que Pulso les envía** cuando nuestro especialista decide apunta a **sus** recursos: `id` = el de su
+Task (si lo mandaron), `focus` y `basedOn` = `ServiceRequest/<su id>` (más su `identifier`), `for` =
+`Patient/<su id>`, `statusReason` y `businessStatus` con el motivo, `owner` = Hospital San Rafael (Pulso) e
+`identifier` con nuestro número. Lleva `X-Timestamp` y `X-Nonce` nuevos, y firma solo si se acordó.
 
 ## A5. Lo que Pulso envía (R32: consentimiento y minimización)
 
@@ -137,6 +165,10 @@ para una remisión nuestra:
   teléfono, correo ni dirección.
 - **Observation:** las que elija el médico o, si no elige, el último valor de cada examen de los últimos
   30 días (máximo 20).
+- **Forma del Bundle:** `transaction`, todas las entradas con `PUT` e ids estables (`pac-…`, `rem-<n>`, `obs-…`,
+  `rep-…`, `con-…`), referencias `Tipo/id`, más un `Consent` activo y un `Task` `requested` con `focus` al
+  `ServiceRequest/rem-<n>`. Como id de la remisión en el socio se toma su cabecera `X-Remision-Externa`, el
+  `id` del cuerpo o `Location`, en ese orden.
 - Si el socio no responde, la remisión queda guardada (`estado_envio = fallida`) y el médico la reenvía.
 
 ## A6. Cómo conectarse con cualquier equipo (checklist)
@@ -165,16 +197,26 @@ Siempre un `OperationOutcome` con un `issue` por problema (`diagnostics` dice qu
 
 | HTTP | Cuándo |
 |---|---|
-| 400 | El cuerpo no es JSON |
+| 400 | El cuerpo no es JSON, o `x-nonce` con formato inválido |
 | 401 | Sin credencial, credencial inválida o vencida, firma inválida, nonce repetido, cliente inactivo |
 | 403 | La credencial no tiene el scope de esa ruta, o no está asociada a una institución |
 | 404 | El Task o la remisión no existe (o no es de su institución) |
-| 409 | La misma remisión ya se recibió; no hay especialistas para recibirla |
+| 409 | La misma remisión ya se recibió; `x-nonce` repetido; no hay especialistas para recibirla |
 | 413 | Cuerpo de más de 1 MB |
 | 422 | El recurso no cumple el contrato (LOINC, UCUM, SNOMED, referencias, reporte no aprobado…) |
 
 Cada rechazo se audita (`rechazo_externo`) y, si no es una credencial mala o un duplicado, avisa al admin
 (`interop_rechazo`).
+
+## A8. Socios probados
+
+| Institución | Fecha | Qué se probó | Resultado |
+|---|---|---|---|
+| Pulso "espejo" (Pulso como su propio socio) | Cada corrida del CI | El viaje completo: token, Bundle, aceptación, rechazo, firma, auditoría | `scripts/test_remisiones_externas.py`, verde |
+| Sistema de apoyo al triaje hospitalario (equipo socio) | 2026-11-21 | Su contrato (`CONTRATO_R30`): OAuth2 con `bundle:write task:write`, `x-nonce`, paciente seudonimizado, `PUT`, `Consent`, `Task`, presión arterial con `component` | Ida y vuelta en los dos sentidos: su remisión llegó en vivo a nuestro especialista y su aceptación les llegó como `Task`; la nuestra igual en sentido contrario. Guardado en `remisiones` y auditado en los dos lados |
+
+La compatibilidad con el contrato del socio quedó como prueba automática (`test_remisiones_externas.py` §9:
+un Bundle con exactamente su forma), para que no se rompa con cambios futuros.
 
 ---
 
