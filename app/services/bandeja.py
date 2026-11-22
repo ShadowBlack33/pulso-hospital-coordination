@@ -41,6 +41,11 @@ ROLES_POR_TIPO: dict[str, frozenset[str]] = {
     "factura_creada":     frozenset({"contable", "admin"}),
     "factura_fallida":    frozenset({"contable", "admin"}),
     "cuenta_bloqueada":   frozenset({"admin"}),
+    # Proyecto final: eventos que vienen de OTRA institución (docs/EVENTOS.md) y de la defensa del agente.
+    "remision_externa_recibida":   frozenset({"especialista", "medico", "admin"}),
+    "remision_externa_respondida": frozenset({"medico", "especialista", "admin"}),
+    "interop_rechazo":             frozenset({"admin"}),
+    "inyeccion_detectada":         frozenset({"admin"}),
 }
 
 _RESERVADAS = {"id", "tipo", "mensaje", "fecha", "leida", "paciente_id"}

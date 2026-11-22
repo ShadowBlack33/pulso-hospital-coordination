@@ -254,7 +254,8 @@ r = http.post("/remisiones", headers=h(tok["medico"]),
 rem2 = r.json().get("id")
 canales["especialista"].esperar(lambda e: e["tipo"] == "remision_nueva" and e.get("remision_id") == rem2)
 r = http.post(f"/remisiones/{rem2}/rechazar", headers=h(tok["especialista"]), json={"motivo": "No es de mi especialidad"})
-check("El especialista no puede rechazarla (la ruta no existe)", r.status_code in (404, 405), r.text[:120])
+# Proyecto final: /rechazar existe solo para las remisiones de OTRA institución; una interna sigue sin rechazarse.
+check("El especialista no puede rechazar una remisión interna (409)", r.status_code == 409, r.text[:120])
 check("Nadie recibe 'remision_rechazada'",
       not canales["medico"].recibio(lambda e: e["tipo"] == "remision_rechazada" and e.get("remision_id") == rem2))
 check("Aceptar sin ser el destinatario sigue prohibido",

@@ -547,7 +547,9 @@ if tok_m01 and tok_e01 and pac_m:
         check("Con la carga igual, la segunda remisión va a otro especialista",
               primero != segundo or len([e for e in antes if e["especialidad"] == varios[0]["nombre"] and e["en_linea"]]) == 1)
     r = client.post(f"/remisiones/{rid2}/rechazar", headers=h(tok_e01), json={"motivo": "No corresponde a mi especialidad"})
-    check("El especialista ya no puede rechazar una remisión (la ruta no existe)", r.status_code in (404, 405), r.text[:120])
+    # Proyecto final: /rechazar existe solo para las remisiones de OTRA institución; una interna sigue sin rechazarse.
+    check("El especialista no puede rechazar una remisión interna (409)",
+          r.status_code == 409 and "otra institución" in r.text, r.text[:120])
 if pac_m and yo_esp:
     r = client.post(f"/remisiones/{rid2}/atender", headers=h(tok_e01))
     check("Cerrar como atendida una remisión aceptada", r.status_code == 200 and r.json()["estado"] == "atendida", r.text[:120])

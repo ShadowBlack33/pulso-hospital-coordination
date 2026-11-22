@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, Loader2, Send, Users } from "lucide-react";
 import { useAvisos } from "../Avisos";
 import * as S from "../../lib/servicios";
+import RemitirExterna from "./RemitirExterna";
 
 const VACIO = { especialidad_id: "", tipo_solicitud: "", motivo: "", prioridad: "prioritaria" };
 
@@ -109,6 +110,7 @@ export default function PestanaRemitir({ pacienteId }) {
         {enviando ? <Loader2 size={15} className="anim-spin" /> : <Send size={15} />}Remitir
       </button>
     </form>
+    <RemitirExterna pacienteId={pacienteId} especialidades={opciones.especialidades} />
     </div>
   );
 }

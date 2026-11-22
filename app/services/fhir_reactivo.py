@@ -267,9 +267,10 @@ def _resumen(obs: dict) -> tuple[str, str | None]:
     return (partes[0] + (f": {texto}." if texto else "."), cod)
 
 
-def procesar_observacion(db, obs: dict) -> dict:
+def procesar_observacion(db, obs: dict, paciente_id: str | None = None) -> dict:
     """
-    Reacciona a una Observation nueva. Devuelve {"resultado": ...}; el llamador
+    Reacciona a una Observation nueva. `paciente_id` lo da la puerta de interoperabilidad (app/services/
+    interop.py), que ya identificó al paciente por su identificador federado; sin él se busca como siempre. Devuelve {"resultado": ...}; el llamador
     hace el commit (la notificación, la auditoría y el registro de evento se
     confirman juntos, y el evento en vivo sale después del commit).
     """
@@ -289,7 +290,7 @@ def procesar_observacion(db, obs: dict) -> dict:
     if nuevo is None:
         return {"resultado": "duplicada"}   # HAPI reintentó: ya se atendió
 
-    paciente_id = _paciente_de(db, obs)
+    paciente_id = paciente_id or _paciente_de(db, obs)
     mensaje, codigo = _resumen(obs)
     base = {"origen": "fhir", "observation_id": oid, "codigo": codigo}
     if paciente_id is None:

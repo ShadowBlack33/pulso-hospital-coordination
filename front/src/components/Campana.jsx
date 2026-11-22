@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { pedirPermisoEscritorio, permisoEscritorio } from "../lib/sonido";
-import { Activity, AlertTriangle, Bell, BellRing, CheckCircle2, FileText, Receipt, Send, UserX } from "lucide-react";
+import { Activity, AlertTriangle, Bell, BellRing, Building2, CheckCircle2, FileText, Receipt, Send, ShieldAlert, UserX } from "lucide-react";
 import Panel from "./Panel";
 import ChipDemo from "./ChipDemo";
 import { useTiempoReal } from "../lib/tiempoReal";
@@ -15,6 +15,10 @@ const ICONOS = {
   alerta_escalada: [AlertTriangle, "text-coral-deep"],
   reporte_pendiente: [FileText, "text-metric-blue"],
   fhir_observation: [Activity, "text-sleep-lilac"],
+  remision_externa_recibida: [Building2, "text-metric-blue"],
+  remision_externa_respondida: [Building2, "text-green-deep"],
+  interop_rechazo: [ShieldAlert, "text-gold-deep"],
+  inyeccion_detectada: [ShieldAlert, "text-coral-deep"],
 };
 
 /** Campana con el contador de no leídas y la bandeja (R18). Se actualiza sola con el canal en vivo. */

@@ -1,4 +1,4 @@
-# Catálogo de eventos y sistema activo (R17 a R21)
+# Catálogo de eventos y sistema activo (R17 a R21, ampliado en el proyecto final)
 
 Pulso no espera a que alguien pregunte: cuando ocurre un hecho, avisa a quien le
 corresponde, factura o alerta, y lo deja auditado. Este documento dice **qué
@@ -57,6 +57,10 @@ paciente o un contable **nunca** recibe un evento clínico.
 | `alerta_critica` | El modelo clasifica un caso como crítico → `al_alerta_critica` | El clínico responsable (`dirigida_a_usuario` de la alerta) | Paciente, contable, otros clínicos | Alerta `activa`: aviso persistente hasta que se reconozca con nota |
 | `alerta_escalada` | La alerta lleva N min sin reconocer (servidor) | Los otros médicos y especialistas del paciente | Admin, paciente, contable | Auditoría `escalar`; el clínico sigue viéndola activa; el coordinador la ve en `/alertas/sin-atender` |
 | `fhir_observation` | Llega una Observation a HAPI (Subscription) | Los clínicos responsables del paciente | Paciente, contable | Auditoría con origen FHIR; el aviso dice qué llegó (p. ej. glucosa, LOINC 2339-0) |
+| `remision_externa_recibida` | **Otra institución** nos remite un paciente (`POST /interop/Bundle` válido) → `al_remision_externa` | El especialista asignado por reparto de carga | Paciente, contable, otros clínicos | Sube `remisiones_recibidas`; auditoría `remision_recibida` con origen externo; el especialista acepta o rechaza con motivo |
+| `remision_externa_respondida` | **El socio responde** una remisión nuestra (`POST /interop/Task`: accepted, rejected o completed) → `al_respuesta_socio` | El médico que la envió | Paciente, contable | La remisión saliente cambia de estado; auditoría `respuesta_socio` con origen externo |
+| `interop_rechazo` | **Rechazo por validación**: un sistema externo envió un recurso inválido o sin permiso (422, 403, 413…) → `al_interop_rechazo` | Los admin | Todos los demás roles | Auditoría `rechazo_externo` con la lista de problemas; el socio recibe un `OperationOutcome`; no se escribe nada |
+| `inyeccion_detectada` | Un usuario intenta manipular al agente o al asistente (R25) → `al_inyeccion` | Los admin (con usuario e IP) | Todos los demás roles | Auditoría `inyeccion_detectada`; al tercer intento en 10 min, bloqueo temporal del usuario (423) |
 
 Los avisos **no llevan nombre, documento ni texto clínico libre**: identifican
 al paciente por su `paciente_id` (índice ciego) y el detalle se consulta en la
@@ -157,6 +161,32 @@ flowchart LR
 
 Comprobarlo contra el HAPI real: `python scripts/registrar_subscription.py --probar <fhir_patient_id>`.
 
+## 6b. Eventos externos: el intercambio con otra institución (proyecto final)
+
+El flujo de [INTEROP.md](INTEROP.md) reutiliza el mismo canal en vivo, la misma bandeja y los mismos
+contadores (R17-R19). Nada se recarga: el especialista de B ve la remisión llegar y el médico de A ve la
+respuesta llegar.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MA as Médico (Pulso)
+  participant A as Pulso (A)
+  participant B as Socio (B)
+  participant EB as Especialista (B)
+  MA->>A: POST /remisiones/externas (consentimiento vigente)
+  A->>B: POST /interop/Bundle (Patient, ServiceRequest, Observation, DiagnosticReport aprobado)
+  B-->>A: 201 Task requested (o 422 OperationOutcome)
+  B--)EB: remision_externa_recibida (bandeja + contador)
+  EB->>B: aceptar o rechazar con motivo
+  B->>A: POST /interop/Task (accepted / rejected)
+  A--)MA: remision_externa_respondida (en vivo)
+```
+
+Cuando Pulso es **B** (recibe), los eventos son `remision_externa_recibida` y, si el recurso es inválido,
+`interop_rechazo`. Cuando Pulso es **A** (envía), el evento es `remision_externa_respondida`. En los dos
+lados la auditoría registra el origen externo y el `client_id` del socio.
+
 ## 7. Garantías y límites declarados
 
 | Tema | Qué se garantiza | Límite conocido |
@@ -166,6 +196,8 @@ Comprobarlo contra el HAPI real: `python scripts/registrar_subscription.py --pro
 | Entrega | Un cliente desconectado no pierde nada: su bandeja está en la base | El canal en vivo no reentrega lo perdido; el front relee la bandeja al reconectar |
 | Escala | Una réplica de la API (broker en memoria) | Con varias réplicas hace falta Redis pub/sub |
 | Subscription | Se registra y verifica sola; criterio con respaldos si HAPI rechaza el primero | Probada con un servidor HAPI simulado; validar contra el HAPI real con el script de la sección 6 |
+| Respuesta al socio | El Task sale después del commit de aceptar o rechazar; si el socio no responde queda `estado_envio = fallida` y él puede consultar `GET /interop/Task/{id}` | No se reintenta solo |
+| Envío al socio | La remisión saliente se guarda antes de enviar: si el socio está caído no se pierde | La reintenta el médico con *Reenviar* |
 
 ## 8. Contrato para los demás módulos
 
