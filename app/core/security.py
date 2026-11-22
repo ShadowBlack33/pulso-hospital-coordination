@@ -86,9 +86,11 @@ def crear_access_token(usuario_id: int, username: str, rol_codigo: str,
                        permisos: list[str], personal_id: int | None = None,
                        paciente_id: str | None = None, sesion_id: int | None = None) -> str:
     ahora = datetime.now(timezone.utc)
+    # Minimización (semana 14): el token lleva el id, el rol y lo que el servidor necesita para
+    # autorizar. No lleva nombre, documento ni username: quien copie un token no aprende quién es.
+    # `username` se conserva en la firma de la función por compatibilidad, pero no va en el token.
     payload = {
         "sub": str(usuario_id),
-        "username": username,
         "rol": rol_codigo,
         "permisos": permisos,
         "personal_id": personal_id,

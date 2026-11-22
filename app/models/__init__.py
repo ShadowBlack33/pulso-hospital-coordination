@@ -107,6 +107,8 @@ class Personal(Base):
     apellido_cifrado = Column(LargeBinary, nullable=False)
     telefono_cifrado = Column(LargeBinary)
     email_cifrado = Column(LargeBinary)
+    telefono_bidx = Column(String(64))     # blind index (db/05_seguridad_e_interop.sql); no es único
+    email_bidx = Column(String(64))
     registro_profesional_cifrado = Column(LargeBinary)
     especialidad_id = Column(Integer, ForeignKey("especialidades.id"))
     tipo_personal = Column(String(40), nullable=False)
@@ -240,6 +242,9 @@ class Paciente(Base):
     apellido_cifrado = Column(LargeBinary, nullable=False)
     telefono_cifrado = Column(LargeBinary)
     email_cifrado = Column(LargeBinary)
+    telefono_bidx = Column(String(64))     # blind index (db/05_seguridad_e_interop.sql); no es único
+    email_bidx = Column(String(64))
+    sid_federado = Column(String(32))      # identificador compartido entre sistemas (db/05_seguridad_e_interop.sql)
     direccion_cifrada = Column(LargeBinary)
     fecha_nacimiento = Column(Date, nullable=False)
     sexo = Column(String(1), nullable=False)
@@ -354,6 +359,9 @@ class LogAuditoria(Base):
     user_agent = Column(Text)
     endpoint = Column(String(200))
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    # Auditoría encadenada (db/05_seguridad_e_interop.sql, app/services/auditoria_cadena.py)
+    huella_anterior = Column(String(64))
+    huella = Column(String(64))
 
 
 class HistorialCambio(Base):

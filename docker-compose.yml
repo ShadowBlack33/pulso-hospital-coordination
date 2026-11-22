@@ -114,7 +114,7 @@ services:
 
   # PostgreSQL propio del sistema (R05). Ver el encabezado: mientras el equipo
   # use Neon, este servicio corre pero la API no lo usa. Al crear el volumen
-  # por primera vez carga db/esquema_completo.sql (estructura y catálogos) y db/03_rag.sql;
+  # por primera vez carga db/esquema_completo.sql (estructura y catálogos), db/03_rag.sql y db/05_seguridad_e_interop.sql;
   # los datos se cargan después (docs/DESPLIEGUE.md).
   postgres:
     # pgvector/pgvector es PostgreSQL 16 con la extensión vector (RAG).
@@ -131,6 +131,7 @@ services:
       - hsr_pgdata:/var/lib/postgresql/data
       - ./db/esquema_completo.sql:/docker-entrypoint-initdb.d/01_esquema_completo.sql:ro
       - ./db/03_rag.sql:/docker-entrypoint-initdb.d/02_rag.sql:ro
+      - ./db/05_seguridad_e_interop.sql:/docker-entrypoint-initdb.d/03_seguridad_e_interop.sql:ro
     # Publicado solo en este equipo (puerto 5433 para no chocar con un
     # PostgreSQL instalado), para cargar los datos con los scripts.
     ports:
@@ -229,6 +230,9 @@ services:
       context: .
       dockerfile: Dockerfile.api
     container_name: hsr-jornada
+    # Solo corre scripts; no sirve en :8000, así que el HEALTHCHECK de Dockerfile.api no aplica.
+    healthcheck:
+      disable: true
     env_file: .env
     environment:
       ORTHANC_URL: http://orthanc:8042
