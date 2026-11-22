@@ -25,7 +25,7 @@ const EJEMPLOS = {
                 "¿Qué pasa si nadie reconoce una alerta crítica en 5 minutos?"],
 };
 
-=======
+
 const EJEMPLOS_CLINICOS = ["¿Cómo va mi turno?", "¿Cómo van los quirófanos hoy?",
                            "¿Desde qué cifra de potasio la hiperpotasemia es grave?",
                            "¿Con qué hemoglobina se transfunde a un paciente estable?"];
@@ -45,7 +45,6 @@ function pasos(herramientas) {
   return [...new Set(nombres)];
 }
 const nuevoId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
 
 /** Quién produjo la respuesta, en una línea discreta (útil para explicar el RAG). */
 function origen(m) {

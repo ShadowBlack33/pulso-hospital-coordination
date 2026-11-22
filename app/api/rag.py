@@ -28,8 +28,6 @@ from app.core.security import tiene_permiso
 from app.models import Paciente
 from app.services import asistente_sistema
 from app.services import rag as svc
-
-from app.services import incidentes
 from app.services.auditoria import registrar
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
