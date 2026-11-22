@@ -265,6 +265,11 @@ try:
           httpx.post(f"{B}/interop/Task", headers=SIS, json={"resourceType": "Task", "status": "accepted",
                                                              "basedOn": [{"identifier": {"value": "999999"}}]}).status_code == 404)
 
+    otra = db.execute(text("SELECT id FROM remisiones WHERE direccion = 'saliente' AND socio_id = :s ORDER BY id DESC LIMIT 1"),
+                      {"s": socio_id}).scalar()
+    r = httpx.post(f"{B}/interop/Task", headers=SIS, json={"resourceType": "Task", "id": f"rem-{otra}", "status": "accepted"})
+    check("Un Task que solo trae id = rem-<n> (el Task que les enviamos) también se acepta", r.status_code == 200, r.text)
+
     print("\n[8] R29 · firma HMAC para el cliente que la exige")
     firmado = I.crear_cliente(db, f"Con firma {SUF}", exige_firma=True)
     db.commit()

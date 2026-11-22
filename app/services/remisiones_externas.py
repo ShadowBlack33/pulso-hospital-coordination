@@ -483,7 +483,8 @@ def recibir_task(db, client_id: str, task, request=None) -> tuple[int, dict]:
                 salida.append(str(ref["reference"]).rsplit("/", 1)[-1])
         return salida
     # Primero lo que apunta a NUESTRO ServiceRequest (basedOn/focus); el identifier del Task es del socio.
-    candidatos = _valores([*(task.get("basedOn") or []), task.get("focus") or {}]) or _valores(task.get("identifier") or [])
+    candidatos = (_valores([*(task.get("basedOn") or []), task.get("focus") or {}]) or _valores(task.get("identifier") or [])
+                  or [str(task.get("id") or "")])      # o el id del Task que les enviamos (rem-<n>)
     numeros = [int(c.rsplit("-", 1)[-1]) for c in candidatos if re.fullmatch(r"(?:[A-Za-z]+-)?\d{1,9}", c)]
     if not numeros:
         raise I.ErrorInterop(422, "Task inválido", "invalid",
