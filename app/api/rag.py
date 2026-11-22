@@ -28,8 +28,7 @@ from app.core.security import tiene_permiso
 from app.models import Paciente
 from app.services import asistente_sistema
 from app.services import rag as svc
-<<<<<<< HEAD
-=======
+
 from app.services import incidentes
 >>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
 from app.services.auditoria import registrar
@@ -60,18 +59,6 @@ def contexto_rag(request: Request, payload: dict = Depends(get_token_payload),
                           recurso="ia", accion="read", db=db, request=request)
 
 
-<<<<<<< HEAD
-=======
-ROLES_SIN_CLINICA = {"contable"}
-
-
-def _fuente(c: dict) -> dict:
-    """R23: documento y fragmento usados, en una forma estable para el tester."""
-    return {"id": c["id"], "documento": c.get("titulo") or c["documento_id"], "documento_id": c["documento_id"],
-            "seccion": c.get("seccion"), "fragmento": c.get("extracto"), "tipo": c.get("tipo")}
-
-
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
 def _denegar(db: Session, ctx: ContextoAcceso, request: Request, mensaje: str):
     registrar(db, ctx.usuario, "rag_consulta", None, "rag_preguntar", resultado="denegado", request=request)
     db.commit()
@@ -99,23 +86,6 @@ def fuentes(ctx: ContextoAcceso = Depends(contexto_rag), db: Session = Depends(g
 def preguntar(datos: Pregunta, request: Request,
               ctx: ContextoAcceso = Depends(contexto_rag),
               db: Session = Depends(get_db)):
-<<<<<<< HEAD
-=======
-    # R24: el contable no ve datos clínicos. Su asistente solo recupera documentos de facturación (filtro
-    # por audiencia en SQL) y cualquier pregunta sobre un paciente le da 403 (no tiene ia:read). El agente
-    # clínico (/agente/chat) también le responde 403.
-    if datos.paciente_id and ctx.payload.get("rol") in ROLES_SIN_CLINICA:
-        _denegar(db, ctx, request, "Su perfil no consulta datos clínicos")
-    # R25: bloqueo temporal (423) y preguntas que intentan manipular al asistente.
-    incidentes.exigir_sin_bloqueo(db, ctx.usuario, request, "rag_consulta")
-    reglas = incidentes.detectar(datos.pregunta)
-    if reglas:
-        inc = incidentes.registrar_incidente(db, ctx.usuario, request, "rag_consulta", reglas)
-        db.commit()
-        return {"consulta_id": None, "respuesta": incidentes.NEGATIVA, "abstencion": True, "citas": [], "fuentes": [],
-                "confianza": None, "metodo": "ninguno", "generador": "ninguno",
-                "estado": "rechazado_por_seguridad", **inc}
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
     if datos.paciente_id:                       # preguntar por un paciente concreto
         if ctx.alcance is None:
             _denegar(db, ctx, request, "Su perfil no consulta historias clínicas")
@@ -149,10 +119,6 @@ def preguntar(datos: Pregunta, request: Request,
             db.commit()
             return {"consulta_id": consulta_id, "respuesta": sistema["respuesta"],
                     "abstencion": not sistema["permitida"], "citas": [cita] if sistema["permitida"] else [],
-<<<<<<< HEAD
-=======
-                    "fuentes": [_fuente(cita)] if sistema["permitida"] else [],
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
                     "confianza": None, "metodo": "sistema", "generador": "sistema"}
 
     historial = [t.model_dump() for t in datos.historial]
@@ -190,12 +156,7 @@ def preguntar(datos: Pregunta, request: Request,
     db.commit()
 
     salida = {"consulta_id": consulta_id, "respuesta": resp["respuesta"], "abstencion": resp["abstencion"],
-<<<<<<< HEAD
               "citas": citas, "confianza": hallazgo["confianza"], "metodo": hallazgo["metodo_usado"],
-=======
-              "citas": citas, "fuentes": [_fuente(c) for c in citas],
-              "confianza": hallazgo["confianza"], "metodo": hallazgo["metodo_usado"],
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
               "generador": resp["generador"]}
     if resp["abstencion"] and not resp.get("conversacion"):
         # Sin modelo no se inventa nada, pero se dice qué sí se puede preguntar (con modelo, ya
