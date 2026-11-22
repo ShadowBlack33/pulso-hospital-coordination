@@ -212,3 +212,15 @@ esquema, los catálogos, los datos sintéticos y las migraciones `04`–`10`.
 4. **Socio de prueba "espejo"** (Pulso mismo, para el tester y para ensayar sin el otro equipo): el mismo
    `socio-crear` con nuestra propia URL pública y, como credencial, el `client_id`/`client_secret` que imprimió.
 5. **Ensayo:** `python scripts/test_remisiones_externas.py` (contra una base local) hace el viaje completo.
+6. **Código al día:** en la carpeta del despliegue, `git pull` sobre `main` y `docker compose up -d --build api front`.
+7. **La URL debe responder toda la jornada** (obligatorio): PC conectado a la corriente, suspensión e
+   hibernación desactivadas, Docker Desktop abierto. Antes de empezar, abrir la URL pública **desde el celular**
+   (fuera de la red de la casa) y comprobar el login y `GET /api/interop/metadata`.
+8. **`tester.yaml`:** `url_publica`, `api_base` y `fhir_base` con la URL del túnel de ese día
+   (`docker compose logs cloudflared | findstr trycloudflare` en Windows).
+9. **Con el socio:** intercambiar las URL de los túneles; si la de ellos cambió,
+   `python scripts/interop_cliente.py socio-url <codigo> https://SU-URL/api`. Una remisión de prueba en cada
+   sentido antes de la exposición. Socios configurados: `espejo` (Pulso) y `triaje` (Sistema de apoyo al
+   triaje hospitalario).
+10. **Si algo falla con el socio:** Administración → Remisiones muestra `estado_envio` y el detalle del error
+    (código HTTP y respuesta del socio); *Reenviar* lo reintenta sin crear otra remisión.
