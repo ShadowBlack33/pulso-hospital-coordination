@@ -117,6 +117,52 @@ def al_rechazar(db, remision) -> None:
         datos={"remision_id": rid})
 
 
+# --------------------------------------------------------------- remisiones con otras instituciones
+@_seguro
+def al_remision_externa(db, remision) -> None:
+    """Llegó una remisión de otra institución: avisar al especialista asignado (bandeja, canal y contador)."""
+    extra = _g(remision, "datos_externos") or {}
+    prioridad = _g(remision, "prioridad", "prioritaria")
+    bandeja.notificar(
+        db, _usuarios_de_personal(db, _g(remision, "especialista_id"), "especialista"), "remision_externa_recibida",
+        f"Remisión {prioridad} recibida de {extra.get('socio') or 'otra institución'}. Revísela en Remisiones.",
+        paciente_id=_g(remision, "paciente_id"),
+        datos={"remision_id": _g(remision, "id"), "prioridad": prioridad, "origen": "externo",
+               "socio": extra.get("socio")})
+
+
+@_seguro
+def al_respuesta_socio(db, remision, socio: str) -> None:
+    """El socio respondió (aceptó, rechazó o atendió) una remisión nuestra: avisar al médico que la envió."""
+    estado = _g(remision, "estado")
+    destinatarios = {_g(remision, "remitido_por"), *_usuarios_de_personal(db, _g(remision, "medico_id"))}
+    bandeja.notificar(
+        db, destinatarios, "remision_externa_respondida",
+        f"{socio} {'aceptó' if estado == 'aceptada' else 'rechazó' if estado == 'rechazada' else 'marcó como ' + estado} "
+        f"su remisión n.º {_g(remision, 'id')}.",
+        paciente_id=_g(remision, "paciente_id"),
+        datos={"remision_id": _g(remision, "id"), "estado": estado, "origen": "externo", "socio": socio})
+
+
+@_seguro
+def al_interop_rechazo(db, client_id: str | None, ruta: str, http: int, motivo: str) -> None:
+    """Un sistema externo envió algo inválido o sin credencial: avisar al admin (sin datos clínicos)."""
+    bandeja.notificar(
+        db, bandeja.usuarios_con_rol(db, "admin"), "interop_rechazo",
+        f"Se rechazó una petición externa a {ruta} (HTTP {http}) de {client_id or 'un cliente sin credencial válida'}.",
+        datos={"client_id": client_id, "ruta": ruta, "http": http, "motivo": motivo[:160]})
+
+
+@_seguro
+def al_inyeccion(db, usuario_id: int | None, username: str | None, ip: str | None, canal: str, bloqueado: bool) -> None:
+    """Un usuario intentó manipular al agente o al RAG: avisar al admin con quién y desde dónde."""
+    bandeja.notificar(
+        db, bandeja.usuarios_con_rol(db, "admin"), "inyeccion_detectada",
+        f"Intento de manipulación del {canal} por {username or 'usuario desconocido'} desde {ip or 'IP desconocida'}"
+        + (". Quedó bloqueado temporalmente." if bloqueado else "."),
+        datos={"usuario_id": usuario_id, "usuario": username, "ip": ip, "canal": canal, "bloqueado": bloqueado})
+
+
 # ------------------------------------------------------------------ IA
 @_seguro
 def al_reporte_pendiente(db, reporte) -> None:

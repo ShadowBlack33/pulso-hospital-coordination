@@ -166,3 +166,34 @@ export const fuentesAsistente = () => api("/rag/fuentes");
 export const preguntarAsistente = (pregunta, pacienteId, historial = []) =>
   api("/rag/preguntar", { method: "POST",
                           json: { pregunta, historial, ...(pacienteId ? { paciente_id: pacienteId } : {}) } });
+
+// ------------------------------------------------------------------ agente (semana 13)
+/** ¿Este perfil usa el agente? {disponible, puede_usar}. Paciente y contable siguen con el RAG. */
+export const estadoAgente = () => api("/agente/estado");
+/** Un turno con el agente. La memoria vive en el servidor: no se manda historial. */
+export const chatAgente = (mensaje, conversacionId, pacienteId) =>
+  api("/agente/chat", { method: "POST",
+                        json: { mensaje, conversacion_id: conversacionId, ...(pacienteId ? { paciente_id: pacienteId } : {}) } });
+/** Aprobar ("approve") o rechazar ("reject") la acción que propuso el agente. */
+export const decidirAgente = (conversacionId, pacienteId, decision, motivo) =>
+  api("/agente/decidir", { method: "POST",
+                           json: { conversacion_id: conversacionId, decision, ...(motivo ? { motivo } : {}),
+                                   ...(pacienteId ? { paciente_id: pacienteId } : {}) } });
+
+// ------------------------------------------------------------------ proyecto final: otras instituciones (R30-R32)
+export const sociosParaRemitir = async (pacienteId) =>
+  lista(await api(`/interop/socios?paciente_id=${encodeURIComponent(pacienteId)}`), "socios");
+export const remitirExterna = (datos) => api("/remisiones/externas", { method: "POST", json: datos });
+export const reenviarRemision = (id) => api(`/remisiones/${id}/reenviar`, { method: "POST" });
+export const rechazarRemision = (id, motivo) => api(`/remisiones/${id}/rechazar`, { method: "POST", json: { motivo } });
+export const consentimientos = (pacienteId) => api(`/pacientes/${encodeURIComponent(pacienteId)}/consentimientos`);
+export const registrarConsentimiento = (pacienteId, socio, soporte) =>
+  api(`/pacientes/${encodeURIComponent(pacienteId)}/consentimientos`, { method: "POST", json: { socio, ...(soporte ? { soporte } : {}) } });
+export const revocarConsentimiento = (pacienteId, id) =>
+  api(`/pacientes/${encodeURIComponent(pacienteId)}/consentimientos/${id}`, { method: "DELETE" });
+// Admin
+export const sociosAdmin = async () => lista(await api("/admin/interop/socios"), "socios");
+export const cambiarSocio = (codigo, cambios) => api(`/admin/interop/socios/${encodeURIComponent(codigo)}`, { method: "PATCH", json: cambios });
+export const incidentesSeguridad = async () => lista(await api("/admin/seguridad/incidentes"), "incidentes");
+export const bloqueosTemporales = async () => lista(await api("/admin/seguridad/bloqueos"), "bloqueos");
+export const levantarBloqueo = (id) => api(`/admin/seguridad/bloqueos/${id}/levantar`, { method: "POST" });

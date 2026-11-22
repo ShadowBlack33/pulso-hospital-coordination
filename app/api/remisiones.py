@@ -102,7 +102,7 @@ def _nombre_personal(db: Session, pid: int | None) -> str | None:
 
 def _vista(db: Session, r: dict, yo: int | None) -> dict:
     p = db.get(Paciente, r["paciente_id"])
-    esp = db.get(Personal, r["especialista_id"])
+    esp = db.get(Personal, r["especialista_id"]) if r["especialista_id"] else None
     return {
         "id": r["id"], "paciente_id": r["paciente_id"],
         "paciente_nombre": p and f"{descifrar(p.nombre_cifrado, 'pacientes.nombre')} {descifrar(p.apellido_cifrado, 'pacientes.apellido')}",
@@ -115,7 +115,21 @@ def _vista(db: Session, r: dict, yo: int | None) -> dict:
         "motivo": r["motivo"], "prioridad": r["prioridad"], "estado": r["estado"],
         "created_at": r["created_at"], "aceptada_at": r["aceptada_at"],
         "respuesta": r.get("respuesta"), "cerrada_at": r.get("cerrada_at"),
+        # Remisiones con otras instituciones (proyecto final): de dónde viene o a dónde va y cómo va el envío.
+        "direccion": r.get("direccion") or "interna",
+        "institucion": (r.get("datos_externos") or {}).get("socio"),
+        "estado_envio": r.get("estado_envio"), "detalle_envio": r.get("detalle_envio"),
+        "reporte_externo": (r.get("datos_externos") or {}).get("diagnostic_report"),
+        "puede_rechazar": (r.get("direccion") == "entrante" and r["estado"] == "pendiente"
+                           and (yo is None or r["especialista_id"] == yo)),
     }
+
+
+def _avisar_socio(tareas: BackgroundTasks, fila) -> None:
+    """Remisión que llegó de otra institución: el socio recibe un Task con el nuevo estado (R30)."""
+    if fila.get("direccion") == "entrante":
+        from app.services import remisiones_externas    # noqa: PLC0415
+        tareas.add_task(remisiones_externas.responder_socio, fila["id"])
 
 
 def _publicar_fhir(remision_id: int) -> None:
@@ -132,7 +146,7 @@ def _publicar_fhir(remision_id: int) -> None:
             if r is None:
                 return
             p = db.get(Paciente, r["paciente_id"])
-            esp = db.get(Personal, r["especialista_id"])
+            esp = db.get(Personal, r["especialista_id"]) if r["especialista_id"] else None
             recurso = fhir_svc.remision_a_fhir(
                 dict(r), p.fhir_patient_id if p else None, _nombre_personal(db, r["medico_id"]),
                 _nombre_personal(db, r["especialista_id"]),
@@ -154,7 +168,7 @@ def remision_fhir(remision_id: int, ctx: ContextoAcceso = Depends(RequierePermis
                      and r["remitido_por"] != ctx.usuario.id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Remisión no encontrada")
     p = db.get(Paciente, r["paciente_id"])
-    esp = db.get(Personal, r["especialista_id"])
+    esp = db.get(Personal, r["especialista_id"]) if r["especialista_id"] else None
     return fhir_svc.remision_a_fhir(dict(r), p.fhir_patient_id if p else None,
                                     _nombre_personal(db, r["medico_id"]), _nombre_personal(db, r["especialista_id"]),
                                     esp.especialidad.nombre if esp and esp.especialidad else None,
@@ -297,12 +311,14 @@ def aceptar(remision_id: int, request: Request, tareas: BackgroundTasks,
         raise HTTPException(status.HTTP_409_CONFLICT, "La remisión ya no está pendiente")
     registrar(db, ctx.usuario, "remision", remision_id, "update",
               valor_anterior={"estado": "pendiente"}, valor_nuevo={"estado": "aceptada"}, request=request)
-    try:
-        reactores.al_aceptar(db, _Fila(dict(fila)))
-    except Exception:  # noqa: BLE001
-        pass
+    if fila.get("direccion") != "entrante":       # la entrante no tiene médico nuestro: se avisa al socio
+        try:
+            reactores.al_aceptar(db, _Fila(dict(fila)))
+        except Exception:  # noqa: BLE001
+            pass
     db.commit()
     tareas.add_task(_publicar_fhir, remision_id)
+    _avisar_socio(tareas, fila)
     return _vista(db, dict(fila), yo)
 
 
@@ -334,6 +350,7 @@ def _transicion(db: Session, ctx: ContextoAcceso, request: Request, tareas: Back
               valor_anterior={"estado": desde}, valor_nuevo={"estado": hacia}, request=request)
     db.commit()
     tareas.add_task(_publicar_fhir, remision_id)
+    _avisar_socio(tareas, fila)
     return _vista(db, dict(fila), yo)
 
 

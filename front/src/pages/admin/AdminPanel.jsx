@@ -12,8 +12,10 @@ import { useEventos, useTiempoReal } from "../../lib/tiempoReal";
 import { useSondeo } from "../../lib/hooks";
 import { salud } from "../../api";
 import { fechaYHora, haceCuanto } from "../../lib/format";
+import { Socios, Seguridad } from "./InteropSeguridad";
 
-const PESTANAS = [["usuarios", "Usuarios"], ["bloqueadas", "Cuentas bloqueadas"], ["auditoria", "Auditoría"], ["servicios", "Servicios"]];
+const PESTANAS = [["usuarios", "Usuarios"], ["bloqueadas", "Cuentas bloqueadas"], ["auditoria", "Auditoría"], ["servicios", "Servicios"],
+                  ["socios", "Instituciones socias"], ["seguridad", "Seguridad del asistente"]];
 
 /** Panel del admin: crear usuarios (R01), desbloquear cuentas (R02) y consultar la auditoría (R13). */
 export default function AdminPanel() {
@@ -52,6 +54,8 @@ export default function AdminPanel() {
       {pestana === "bloqueadas" && <Bloqueadas lista={bloqueadas} onCambio={cargarUsuarios} />}
       {pestana === "auditoria" && <Auditoria />}
       {pestana === "servicios" && <Servicios />}
+      {pestana === "socios" && <Socios />}
+      {pestana === "seguridad" && <Seguridad />}
     </div>
   );
 }
