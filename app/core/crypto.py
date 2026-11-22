@@ -155,6 +155,39 @@ def blind_index(valor: str, campo: str) -> str:
     return hmac.new(_clave_indice(), mensaje, hashlib.sha256).hexdigest()
 
 
+def _normalizar_telefono(valor: str) -> str:
+    """Solo dígitos y sin el indicativo de Colombia: '+57 300 123 4567' y '300-123-4567' coinciden."""
+    d = "".join(c for c in unicodedata.normalize("NFKD", valor) if c.isdigit())
+    if d.startswith("00"):
+        d = d[2:]
+    return d[2:] if len(d) > 10 and d.startswith("57") else d
+
+
+def _normalizar_email(valor: str) -> str:
+    """Minúsculas y sin espacios en los extremos. NO se quitan puntos: 'a.b@x.co' y 'ab@x.co' son
+    cuentas distintas, y confundirlas mostraría los datos de otra persona."""
+    return unicodedata.normalize("NFKC", valor).strip().lower()
+
+
+def blind_index_contacto(valor: str | None, campo: str) -> str | None:
+    """
+    Blind index de teléfono o correo (campo: 'pacientes.telefono', 'pacientes.email',
+    'personal.telefono' o 'personal.email'). Devuelve None si no hay dato. A diferencia del
+    documento, NO es único: una familia comparte teléfono, así que una búsqueda puede dar varios.
+    """
+    if valor is None or not str(valor).strip():
+        return None
+    if campo.endswith(".telefono"):
+        norm = _normalizar_telefono(str(valor))
+    elif campo.endswith(".email"):
+        norm = _normalizar_email(str(valor))
+    else:
+        raise ValueError(f"campo de contacto desconocido: {campo}")
+    if not norm:
+        return None
+    return hmac.new(_clave_indice(), f"{campo}|{norm}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 # --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------

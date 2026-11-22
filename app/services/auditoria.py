@@ -3,7 +3,9 @@ Auditoría y operaciones "soft".
 
 La tabla log_auditoria es append-only (protegida por trigger en la BD):
 ni siquiera un admin puede alterarla. Eso es lo que la hace válida como
-evidencia de trazabilidad.
+evidencia de trazabilidad. Además cada registro queda sellado con una huella HMAC que incluye la
+del anterior (auditoria_cadena.py): si alguien con acceso a la base desactiva el trigger y edita,
+GET /admin/auditoria/verificar lo detecta.
 """
 from __future__ import annotations
 
@@ -14,12 +16,13 @@ from fastapi import Request
 from sqlalchemy.orm import Session
 
 from app.models import HistorialCambio, LogAuditoria
+from app.services import auditoria_cadena  # noqa: F401  (registra el sellado de la cadena al escribir)
 
 # Campos que NUNCA se escriben en claro en la auditoría ni en el historial.
 CAMPOS_SENSIBLES = {
     "documento_cifrado", "nombre_cifrado", "apellido_cifrado",
     "telefono_cifrado", "email_cifrado", "direccion_cifrada",
-    "documento_bidx", "password_hash", "mfa_secret_cifrado",
+    "documento_bidx", "telefono_bidx", "email_bidx", "sid_federado", "password_hash", "mfa_secret_cifrado",
     "registro_profesional_cifrado",
 }
 
