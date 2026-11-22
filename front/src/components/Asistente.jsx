@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-=======
+
 import { ArrowUp, BookOpen, Check, ChevronDown, Maximize2, Minimize2, RotateCcw, Sparkles, X } from "lucide-react";
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
+
 import * as S from "../lib/servicios";
 import { useUsuario } from "../lib/hooks";
 import Markdown from "./Markdown";

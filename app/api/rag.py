@@ -30,7 +30,6 @@ from app.services import asistente_sistema
 from app.services import rag as svc
 
 from app.services import incidentes
->>>>>>> 99f0773 (feat(rag): fuentes citadas, payload al LLM con prueba canario y skills)
 from app.services.auditoria import registrar
 
 router = APIRouter(prefix="/rag", tags=["RAG"])
