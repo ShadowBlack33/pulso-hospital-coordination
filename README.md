@@ -50,6 +50,9 @@ In a high-complexity hospital, capacity is coordinated by phone and on boards no
 | **Reactive architecture** | Every business action publishes an event; small *reactors* consume it (notify, bill, alert, escalate). The logic is not glued to each endpoint. |
 | **Traceability** | Append-only audit log protected by a trigger, which never stores passwords or clinical text. Soft delete with history: nothing is erased, only the admin restores. |
 | **Medical imaging** | Orthanc PACS with real chest X-rays from the NIH ChestX-ray14 cohort, visible from the patient record only to whoever can see that patient. |
+| **Security model** | A STRIDE threat model ([`docs/STRIDE.md`](docs/STRIDE.md)) maps every control to a threat across trust boundaries (browser, tunnel/nginx, API, databases, FHIR, PACS, AI service, LLM and partner system). Audit log chained with HMAC and verifiable by the admin. |
+| **Clinical agent** | Tools with role permissions checked in the backend, never in the prompt; every LLM call stores the exact pseudonymized payload (canary test); prompt-injection defense in four layers plus detection in the user question with temporary lockout. |
+| **Inter-institution referrals** | FHIR R4 Bundle out and in, `Task` answers, `Consent` per destination institution, OAuth2 client credentials or API key per institution, optional HMAC signature, validation with `OperationOutcome` and no partial writes. |
 | **Infrastructure** | 11 services in one `docker compose up -d`, published through Cloudflare Tunnel inside the compose. GitHub Actions CI with lint, build and 260+ end-to-end checks against real PostgreSQL. |
 
 ---
@@ -114,7 +117,76 @@ flowchart LR
   FHIR -->|Subscription rest-hook| API
   JR[jornada · demo data] --> PG
   JR --> OR
+  API -->|pseudonymized prompt| LLM[LLM · Gemini / Grok]
+  P[Partner institution] -->|FHIR Bundle / Task · OAuth2 or API key| CF
+  API -->|minimal Bundle with consent| P
 ```
+
+### Services (`docker compose up -d`)
+
+```mermaid
+flowchart TB
+  subgraph publico["Public (Cloudflare Tunnel)"]
+    cloudflared
+  end
+  subgraph borde["Edge"]
+    front["front · nginx<br/>React SPA + reverse proxy"]
+  end
+  subgraph app["Application"]
+    api["api · FastAPI<br/>agent, RAG, interop"]
+    ml["ml · risk model + embeddings"]
+    jornada["jornada · demo day simulator"]
+  end
+  subgraph datos["Data (ports only on 127.0.0.1)"]
+    db[("postgres · PostgreSQL + pgvector")]
+    mongo[("mongo · billing")]
+    fhir["hapi-fhir · HAPI FHIR"]
+    fhirdb[("fhir-db")]
+    orthanc["orthanc · PACS"]
+    pacsdb[("pacs-db")]
+  end
+  cloudflared --> front --> api
+  front --> fhir
+  api --> db & mongo & fhir & orthanc & ml
+  fhir --> fhirdb
+  orthanc --> pacsdb
+  jornada --> db & orthanc
+```
+
+### Event flow
+
+```mermaid
+flowchart LR
+  H[Business fact<br/>referral, approval, alert, external Bundle] --> TX[(Same DB transaction:<br/>fact + notification + audit)]
+  TX -->|after commit| BUS[In-memory event bus]
+  BUS --> SSE[SSE channel /eventos/stream]
+  SSE --> UI[Inbox, counters and toasts<br/>without reloading]
+  BUS --> RE[Reactors: bill, alert, escalate, answer the partner]
+  RE --> TX
+```
+
+### Exchange with a partner institution
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant MD as Physician (Pulso)
+  participant A as Pulso
+  participant B as Partner institution
+  participant SP as Partner specialist
+  MD->>A: Refer to partner (patient consent for that institution)
+  A->>B: POST /oauth/token → token
+  A->>B: POST /interop/Bundle (Patient, ServiceRequest SNOMED, Observation LOINC, approved DiagnosticReport)
+  B-->>A: 201 Task requested · or 422 OperationOutcome (nothing stored)
+  B--)SP: Live notice
+  SP->>B: Accept / reject
+  B->>A: POST /interop/Task (accepted | rejected)
+  A--)MD: Live notice
+  Note over A,B: Both sides audit the exchange with external origin
+```
+
+The contract any team can implement is in [`docs/INTEROP.md`](docs/INTEROP.md); Pulso publishes it at
+`GET /api/interop/metadata`.
 
 ### Automatic flows
 
@@ -207,7 +279,10 @@ Stated as the path forward, not presented as working:
 | [`docs/RAG.md`](docs/RAG.md) | Clinical assistant: corpus, pseudonymization, retrieval, abstention |
 | [`docs/CONTABILIDAD.md`](docs/CONTABILIDAD.md) | Billing documents in MongoDB |
 | [`docs/DATASETS.md`](docs/DATASETS.md) | Image and tabular datasets, licenses and clusters |
-| [`docs/NORMATIVA.md`](docs/NORMATIVA.md) | Regulatory map |
+| [`docs/NORMATIVA.md`](docs/NORMATIVA.md) | Regulatory map, including requirements R23–R33 |
+| [`docs/STRIDE.md`](docs/STRIDE.md) | STRIDE threat model: data-flow diagram, trust boundaries, threats and controls |
+| [`docs/INTEROP.md`](docs/INTEROP.md) | Contract for other institutions: referrals (Bundle/Task), credentials, errors |
+| [`docs/AGENTE.md`](docs/AGENTE.md) | Clinical agent: tools, permissions, payload audit, prompt-injection defense |
 | [`ml/UMBRAL.md`](ml/UMBRAL.md) | Clinical threshold and model metrics |
 | [`tester.yaml`](tester.yaml) | Automated verification contract |
 

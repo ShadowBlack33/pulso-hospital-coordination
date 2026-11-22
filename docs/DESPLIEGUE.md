@@ -64,6 +64,7 @@ La base se arma con pocos archivos en `db/`:
 | --- | --- |
 | `esquema_completo.sql` | Tablas, funciones, triggers y catálogos (roles, permisos, especialidades, EPS, CIE-10, procedimientos, servicios). Es el estado final de las migraciones 01 a 15, que quedan en `db/historial/` como registro (no se vuelven a aplicar). |
 | `03_rag.sql` | Todo lo del RAG: extensión `vector` y tablas `rag_fragmentos`, `rag_preguntas` y `rag_consultas`. Sirve para una base nueva o existente y se puede correr varias veces. |
+| `05_seguridad_e_interop.sql` | Todo lo de la semana 14 y del proyecto final en un archivo: auditoría encadenada, índices ciegos de teléfono y correo, interoperabilidad (`interop_*`, `pacientes.sid_federado`), remisiones entre instituciones (`interop_socios`, columnas nuevas de `remisiones`), consentimiento (`consentimientos`) y agente (`agente_payloads`, `incidentes_seguridad`, `bloqueos_temporales`). Se puede correr varias veces. |
 | `01_datos_sinteticos.sql` | Los datos de personas (no se sube al repositorio: lo genera `scripts/generar_datos.py`). |
 | `00_reset_datos.sql` | Borra solo los datos generados, para regenerarlos. |
 
@@ -78,10 +79,31 @@ Base nueva (o reiniciada), en orden. En la base compartida solo lo hace Carlos:
 ```bash
 python scripts/aplicar_sql.py db/esquema_completo.sql
 python scripts/aplicar_sql.py db/03_rag.sql
+python scripts/aplicar_sql.py db/05_seguridad_e_interop.sql
 python scripts/generar_datos.py --meses 6 --pacientes 4000     # escribe db/01_datos_sinteticos.sql
 python scripts/aplicar_sql.py db/01_datos_sinteticos.sql
 python scripts/rag_indexar.py                                  # guías del RAG
 ```
+
+El archivo 05 va **antes** de cargar los datos: el generador ya escribe
+`telefono_bidx` y `email_bidx`. En el compose se aplican solos al crear el volumen.
+
+**Base que ya tiene datos (por ejemplo Neon), semana 14.** El código nuevo escribe
+`huella`, `huella_anterior`, `telefono_bidx`, `email_bidx` y `sid_federado`, así que
+**primero se aplican las migraciones y después se despliega el código**; al revés, cada
+registro de auditoría y cada alta de paciente fallaría. En orden, con el `.env` de esa base:
+
+```bash
+python scripts/aplicar_sql.py db/05_seguridad_e_interop.sql
+python scripts/reindexar_contacto.py --simular     # cuántas filas cambiaría
+python scripts/reindexar_contacto.py               # teléfono y correo ya cargados
+python scripts/interop_cliente.py reindexar-federado   # con INTEROP_SECRETO_FEDERADO en el .env
+```
+
+Variables nuevas del `.env`: `APP_AUDIT_KEY` (opcional; si falta se deriva de
+`APP_ENCRYPTION_KEY`) e `INTEROP_SECRETO_FEDERADO`. Los registros de auditoría
+anteriores no tienen huella: la verificación los cuenta aparte
+(`anteriores_a_la_cadena`) y la cadena empieza con el primero que se escriba después.
 
 `generar_datos.py` cifra con las claves del `.env` (`APP_ENCRYPTION_KEY`,
 `APP_BLIND_INDEX_KEY`): hay que generar con las mismas claves que usa la API.
@@ -122,7 +144,7 @@ de `medico01` y `especialista01`) y, una sola vez, `cargar_radiografias.py`
 
 ## 4. Usar el PostgreSQL del compose en vez de Neon
 
-El volumen nuevo ya trae `db/esquema_completo.sql` y `db/03_rag.sql`. Faltan los datos, que se
+El volumen nuevo ya trae `db/esquema_completo.sql`, `db/03_rag.sql` y `db/05_seguridad_e_interop.sql`. Faltan los datos, que se
 cargan desde este equipo por el puerto `5433`:
 
 ```bash
@@ -171,3 +193,22 @@ compartida; todo lo demás (HAPI y su base, Orthanc, MongoDB, ml, nginx,
 cloudflared) corre en el compose. Para una ejecución autónoma desde un clon
 limpio, sin Neon, ver la sección 4: el PostgreSQL del compose recibe el
 esquema, los catálogos, los datos sintéticos y las migraciones `04`–`10`.
+
+## Proyecto final: el día de la sustentación
+
+1. **Migración primero** (en Neon o en la base del compose): `python scripts/aplicar_sql.py db/05_seguridad_e_interop.sql`
+   y después el código nuevo. Es idempotente.
+2. **No reiniciar `cloudflared`** durante la jornada: la URL del túnel rápido cambia y el socio depende de ella.
+   Si cambia, avisarle y actualizarla en `tester.yaml`; si cambia la del socio, Administración → Instituciones
+   socias (o `python scripts/interop_cliente.py socio-url <codigo> <url>`), sin redesplegar.
+3. **Registrar al socio** (una vez):
+   ```bash
+   python scripts/interop_cliente.py socio-crear equipoN "Nombre de su institución" https://SU-URL/api --sin-firma
+   # → imprime su client_id, client_secret y api_key: entregárselos por un canal privado
+   export SOCIO_CREDENCIAL_ID=... SOCIO_CREDENCIAL_SECRETO=...     # lo que ELLOS nos dieron
+   python scripts/interop_cliente.py socio-credenciales equipoN --auth oauth2   # o api_key / bearer / ninguno
+   python scripts/interop_cliente.py socios                                    # revisar
+   ```
+4. **Socio de prueba "espejo"** (Pulso mismo, para el tester y para ensayar sin el otro equipo): el mismo
+   `socio-crear` con nuestra propia URL pública y, como credencial, el `client_id`/`client_secret` que imprimió.
+5. **Ensayo:** `python scripts/test_remisiones_externas.py` (contra una base local) hace el viaje completo.

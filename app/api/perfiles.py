@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.core.crypto import cifrar, descifrar, enmascarar
+from app.core.crypto import blind_index_contacto, cifrar, descifrar, enmascarar
 from app.core.deps import ContextoAcceso, RequierePermiso, get_db
 from app.models import Paciente, Personal
 from app.services.auditoria import registrar, soft_edit
@@ -762,8 +762,11 @@ def actualizar_mis_datos(datos: MisDatosActualizar, request: Request,
     paciente no puede tocar los datos de otro. Lo que no se envía no cambia.
     """
     p = _mi_paciente(ctx, db)
-    cambios = {CAMPOS_CONTACTO[c]: cifrar(v.strip(), f"pacientes.{c}")
-               for c, v in datos.model_dump(exclude_unset=True).items() if v is not None and v.strip()}
+    nuevos = {c: v.strip() for c, v in datos.model_dump(exclude_unset=True).items() if v is not None and v.strip()}
+    cambios = {CAMPOS_CONTACTO[c]: cifrar(v, f"pacientes.{c}") for c, v in nuevos.items()}
+    for c in ("telefono", "email"):      # el índice ciego se mantiene al día con el dato
+        if c in nuevos:
+            cambios[f"{c}_bidx"] = blind_index_contacto(nuevos[c], f"pacientes.{c}")
     if not cambios:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se enviaron cambios")
     soft_edit(db, p, cambios, ctx.usuario, "paciente", request=request)
